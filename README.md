@@ -143,6 +143,7 @@ Coming back to the topic, this series of podcasts started in August 2024, when I
 
 ### Distributed Training & Communication
 
+- [FSDP2 Systematic Tutorial](./fsdp2/readme.md): A 7-stage systematic tutorial from distributed basics to combined parallelism (FSDP+TP), with 22 runnable scripts and detailed documentation. Requires PyTorch >= 2.4.
 - [Pending Review] [Implementing Tensor Parallelism From Scratch](./torch/tensor-parallelism/readme.md): Implementation and practice of Tensor Parallelism.
 - [Pending Review] [Expert Parallelism](./rlhf/sys-design/readme-4.md)
 - [NCCL and NVIDIA TOPO](./torch/nccl/readme.md): Introduction to NCCL and NVIDIA GPU detection. Also available on [NCCL and NVIDIA TOPO](https://zhuanlan.zhihu.com/p/6160835906).

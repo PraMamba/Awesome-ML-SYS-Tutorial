@@ -157,6 +157,7 @@ $$
 
 ### Distributed Training & Communication
 
+- [FSDP2 系统学习教程](./fsdp2/readme.md)：从分布式训练基础到组合并行（FSDP+TP），共 7 个阶段、22 个可运行脚本的系统教程，需要 PyTorch >= 2.4。
 - [Pending Review] [手搓 Tensor Parallelism](./torch/tensor-parallelism/readme.md)：关于 Tensor Parallelism 的实现与实践。
 - [NCCL 与 NVIDIA TOPO](./torch/nccl/readme.md)：NCCL 的入门与 NVIDIA 显卡的检测，同样刊载于[NCCL 与 NVIDIA TOPO](https://zhuanlan.zhihu.com/p/6160835906)。
 - [NCCL and SGLang](./torch/nccl/readme_en.md)：NCCL 在 SGLang 中的应用，其实和中文内容非常接近，但是额外刊载了一些并行策略的内容。我应该不会修缮完成这个笔记，而是单独写笔记来记录并行策略。
