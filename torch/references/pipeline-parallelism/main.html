@@ -1,0 +1,673 @@
+<html lang="en" data-content_root="./" data-mode="auto" data-theme="dark" data-version="main (2.15.0a0+gitfe3f518 )" class="fontawesome-i2svg-active fontawesome-i2svg-complete"><body data-feedback-url="https://github.com/pytorch/pytorch" class="pytorch-body" data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode=""><div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <main id="main-content" class="bd-main" role="main"><div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div id="pytorch-article">
+  
+  <article class="bd-article"><section class="tex2jax_ignore mathjax_ignore" id="pipeline-parallelism"><h1 _item_id="31">Pipeline Parallelism<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#pipeline-parallelism" title="Link to this heading">#</a></h1>
+<div class="admonition note">
+<p class="admonition-title" _item_id="33">Note</p>
+<p _item_id="34"><code class="docutils literal notranslate"><span class="pre">torch.distributed.pipelining</span></code> is currently in alpha state and under
+development. API changes may be possible. It was migrated from the <a class="reference external" href="https://github.com/pytorch/PiPPy">PiPPy</a> project.</p>
+</div>
+<section id="why-pipeline-parallel"><h2 _item_id="35">Why Pipeline Parallel?<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#why-pipeline-parallel" title="Link to this heading">#</a></h2>
+<p _item_id="36">Pipeline Parallelism is one of the primitive forms of parallelism for deep learning.
+It allows the <strong>execution</strong> of a model to be partitioned such that multiple
+<strong>micro-batches</strong> can execute different parts of the model code concurrently.
+Pipeline parallelism can be an effective technique for:</p>
+<ul class="simple"><li><p _item_id="37">large-scale training</p></li>
+<li><p _item_id="38">bandwidth-limited clusters</p></li>
+<li><p _item_id="39">large model inference</p></li>
+</ul><p _item_id="40">The above scenarios share a commonality that the computation per device cannot
+hide the communication of conventional parallelism, for example, the weight
+all-gather of FSDP.</p>
+</section><section id="what-is-torch-distributed-pipelining"><h2 _item_id="41">What is <code class="docutils literal notranslate"><span class="pre">torch.distributed.pipelining</span></code>?<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#what-is-torch-distributed-pipelining" title="Link to this heading">#</a></h2>
+<p _item_id="42">While promising for scaling, pipelining is often difficult to implement because
+it needs to <strong>partition the execution</strong> of a model in addition to model weights.
+The partitioning of execution often requires intrusive code changes to your
+model. Another aspect of complexity comes from <strong>scheduling micro-batches in a
+distributed environment</strong>, with <strong>data flow dependency</strong> considered.</p>
+<p _item_id="43">The <code class="docutils literal notranslate"><span class="pre">pipelining</span></code> package provides a toolkit that does said things
+<strong>automatically</strong> which allows easy implementation of pipeline parallelism
+on <strong>general</strong> models.</p>
+<p _item_id="44">It consists of two parts: a
+<strong>splitting frontend</strong> and a <strong>distributed runtime</strong>.
+The splitting frontend takes your model code as-is, splits it up into “model
+partitions”, and captures the data-flow relationship. The distributed runtime
+executes the pipeline stages on different devices in parallel, handling things
+like micro-batch splitting, scheduling, communication, and gradient propagation,
+etc.</p>
+<p _item_id="45">Overall, the <code class="docutils literal notranslate"><span class="pre">pipelining</span></code> package provides the following features:</p>
+<ul class="simple"><li><p _item_id="46">Splitting of model code based on simple specification.</p></li>
+<li><p _item_id="47">Rich support for pipeline schedules, including GPipe, 1F1B,
+Interleaved 1F1B and Looped BFS, and providing the infrastructure for writing
+customized schedules.</p></li>
+<li><p _item_id="48">First-class support for cross-host pipeline parallelism, as this is where PP
+is typically used (over slower interconnects).</p></li>
+<li><p _item_id="49">Composability with other PyTorch parallel techniques such as data parallel
+(DDP, FSDP) or tensor parallel. The <a class="reference external" href="https://github.com/pytorch/torchtitan">TorchTitan</a> project demonstrates a “3D parallel”
+application on the Llama model.</p></li>
+</ul></section><section id="step-1-build-pipelinestage"><h2 _item_id="50">Step 1: build <code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#step-1-build-pipelinestage" title="Link to this heading">#</a></h2>
+<p _item_id="51">Before we can use a <code class="docutils literal notranslate"><span class="pre">PipelineSchedule</span></code>, we need to create <code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code>
+objects that wrap the part of the model running in that stage. The
+<code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code> is responsible for allocating communication buffers and
+creating send/recv ops to communicate with its peers. It manages intermediate
+buffers e.g. for the outputs of forward that have not been consumed yet, and it
+provides a utility for running the backwards for the stage model.</p>
+<p _item_id="52">A <code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code> needs to know the input and output shapes for the stage
+model, so that it can correctly allocate communication buffers. The shapes must
+be static, e.g. at runtime the shapes can not change from step to step. A class
+<code class="docutils literal notranslate"><span class="pre">PipeliningShapeError</span></code> will be raised if runtime shapes do not match the
+expected shapes. When composing with other parallelisms or applying mixed
+precision, these techniques must be taken into account so the <code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code>
+knows the correct shape (and dtype) for the output of the stage module at
+runtime.</p>
+<p _item_id="53">Users may construct a <code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code> instance directly, by passing in an
+<code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> representing the portion of the model that should run on the
+stage. This may require changes to the original model code. See the example
+in <a class="reference internal" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#option-1-manual"><span class="std std-ref">Option 1: splitting a model manually</span></a>.</p>
+<p _item_id="54">Alternatively, the splitting frontend can use graph partitioning to split your
+model into a series of <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> automatically. This technique requires the
+model is traceable with <code class="docutils literal notranslate"><span class="pre">torch.Export</span></code>. Composability of the resulting
+<code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> with other parallelism techniques is experimental, and may require
+some workarounds. Usage of this frontend may be more appealing if the user
+cannot easily change the model code. See <a class="reference internal" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#option-2-tracer"><span class="std std-ref">Option 2: splitting a model automatically</span></a> for more
+information.</p>
+</section><section id="step-2-use-pipelineschedule-for-execution"><h2 _item_id="55">Step 2: use <code class="docutils literal notranslate"><span class="pre">PipelineSchedule</span></code> for execution<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#step-2-use-pipelineschedule-for-execution" title="Link to this heading">#</a></h2>
+<p _item_id="56">We can now attach the <code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code> to a pipeline schedule, and run the
+schedule with input data. Here is a GPipe example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell0" tabindex="-1" _item_id="57"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.pipelining</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScheduleGPipe</span>
+
+<span class="c1"># Create a schedule</span>
+<span class="n">schedule</span> <span class="o">=</span> <span class="n">ScheduleGPipe</span><span class="p">(</span><span class="n">stage</span><span class="p">,</span> <span class="n">n_microbatches</span><span class="p">)</span>
+
+<span class="c1"># Input data (whole batch)</span>
+<span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">in_dim</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+
+<span class="c1"># Run the pipeline with input `x`</span>
+<span class="c1"># `x` will be divided into microbatches automatically</span>
+<span class="k">if</span> <span class="n">rank</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+    <span class="n">schedule</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">schedule</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+</pre></div>
+</div>
+<p _item_id="58">If your input pipeline already produces microbatches, pass them directly:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell1" tabindex="-1" _item_id="59"><span></span><span class="n">arg_mbs</span> <span class="o">=</span> <span class="p">[(</span><span class="n">x0</span><span class="p">,),</span> <span class="p">(</span><span class="n">x1</span><span class="p">,)]</span>
+<span class="n">kwarg_mbs</span> <span class="o">=</span> <span class="p">[{</span><span class="s2">"mask"</span><span class="p">:</span> <span class="n">mask0</span><span class="p">},</span> <span class="p">{</span><span class="s2">"mask"</span><span class="p">:</span> <span class="n">mask1</span><span class="p">}]</span>
+<span class="n">target_mbs</span> <span class="o">=</span> <span class="p">[</span><span class="n">target0</span><span class="p">,</span> <span class="n">target1</span><span class="p">]</span>
+
+<span class="n">schedule</span><span class="o">.</span><span class="n">step</span><span class="p">(</span>
+    <span class="n">arg_mbs</span><span class="o">=</span><span class="n">arg_mbs</span><span class="p">,</span>
+    <span class="n">kwarg_mbs</span><span class="o">=</span><span class="n">kwarg_mbs</span><span class="p">,</span>
+    <span class="n">target_mbs</span><span class="o">=</span><span class="n">target_mbs</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="60">Note that the above code needs to be launched for each worker, thus we use a
+launcher service to launch multiple processes:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre id="codecell2" tabindex="-1" _item_id="61"><span></span>torchrun<span class="w"> </span>--nproc_per_node<span class="o">=</span><span class="m">2</span><span class="w"> </span>example.py
+</pre></div>
+</div>
+</section><section id="options-for-splitting-a-model"><h2 _item_id="62">Options for Splitting a Model<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#options-for-splitting-a-model" title="Link to this heading">#</a></h2>
+<section id="option-1-splitting-a-model-manually"><h3 _item_id="63">Option 1: splitting a model manually<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#option-1-splitting-a-model-manually" title="Link to this heading">#</a></h3>
+<p _item_id="64">To directly construct a <code class="docutils literal notranslate"><span class="pre">PipelineStage</span></code>, the user is responsible for providing
+a single <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> instance that owns the relevant <code class="docutils literal notranslate"><span class="pre">nn.Parameters</span></code> and
+<code class="docutils literal notranslate"><span class="pre">nn.Buffers</span></code>, and defines a <code class="docutils literal notranslate"><span class="pre">forward()</span></code> method that executes the operations
+relevant for that stage. For example, a condensed version of the Transformer
+class defined in Torchtitan shows a pattern of building an easily partitionable
+model.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell3" tabindex="-1" _item_id="65"><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Transformer</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model_args</span><span class="p">:</span> <span class="n">ModelArgs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">tok_embeddings</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+
+        <span class="c1"># Using a ModuleDict lets us delete layers without affecting names,</span>
+        <span class="c1"># ensuring checkpoints will correctly save and load.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">layers</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">ModuleDict</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">layer_id</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">model_args</span><span class="o">.</span><span class="n">n_layers</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">layer_id</span><span class="p">)]</span> <span class="o">=</span> <span class="n">TransformerBlock</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">output</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tokens</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">):</span>
+        <span class="c1"># Handling layers being 'None' at runtime enables easy pipeline splitting</span>
+        <span class="n">h</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tok_embeddings</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">tok_embeddings</span> <span class="k">else</span> <span class="n">tokens</span>
+
+        <span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">layers</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
+            <span class="n">h</span> <span class="o">=</span> <span class="n">layer</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">freqs_cis</span><span class="p">)</span>
+
+        <span class="n">h</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">norm</span><span class="p">(</span><span class="n">h</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">norm</span> <span class="k">else</span> <span class="n">h</span>
+        <span class="n">output</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">output</span><span class="p">(</span><span class="n">h</span><span class="p">)</span><span class="o">.</span><span class="n">float</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">output</span> <span class="k">else</span> <span class="n">h</span>
+        <span class="k">return</span> <span class="n">output</span>
+</pre></div>
+</div>
+<p _item_id="66">A model defined in this manner can be easily configured per stage by first
+initializing the whole model (using meta-device to avoid OOM errors), deleting
+undesired layers for that stage, and then creating a PipelineStage that wraps
+the model. For example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell4" tabindex="-1" _item_id="67"><span></span><span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">(</span><span class="s2">"meta"</span><span class="p">):</span>
+    <span class="k">assert</span> <span class="n">num_stages</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">"This is a simple 2-stage example"</span>
+
+    <span class="c1"># we construct the entire model, then delete the parts we do not need for this stage</span>
+    <span class="c1"># in practice, this can be done using a helper function that automatically divides up layers across stages.</span>
+    <span class="n">model</span> <span class="o">=</span> <span class="n">Transformer</span><span class="p">()</span>
+
+    <span class="k">if</span> <span class="n">stage_index</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="c1"># prepare the first stage model</span>
+        <span class="k">del</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="s2">"1"</span><span class="p">]</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">norm</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">output</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">elif</span> <span class="n">stage_index</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="c1"># prepare the second stage model</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">tok_embeddings</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">del</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="s2">"0"</span><span class="p">]</span>
+
+    <span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.pipelining</span><span class="w"> </span><span class="kn">import</span> <span class="n">PipelineStage</span>
+    <span class="n">stage</span> <span class="o">=</span> <span class="n">PipelineStage</span><span class="p">(</span>
+        <span class="n">model</span><span class="p">,</span>
+        <span class="n">stage_index</span><span class="p">,</span>
+        <span class="n">num_stages</span><span class="p">,</span>
+        <span class="n">device</span><span class="p">,</span>
+    <span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="68">When composing with other Data or Model parallelism techniques, <code class="docutils literal notranslate"><span class="pre">output_args</span></code>
+may also be required, if the output shape/dtype of the model chunk will be
+affected.</p>
+</section><section id="option-2-splitting-a-model-automatically"><h3 _item_id="69">Option 2: splitting a model automatically<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#option-2-splitting-a-model-automatically" title="Link to this heading">#</a></h3>
+<p _item_id="70">If you have a full model and do not want to spend time on modifying it into a
+sequence of “model partitions”, the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API is here to help.
+Here is a brief example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell5" tabindex="-1" _item_id="71"><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Model</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">emb</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Embedding</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">layers</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">ModuleList</span><span class="p">(</span>
+            <span class="n">Layer</span><span class="p">()</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lm</span> <span class="o">=</span> <span class="n">LMHead</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">emb</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="n">layer</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">x</span>
+</pre></div>
+</div>
+<p _item_id="72">If we print the model, we can see multiple hierarchies, which makes it hard to split by hand:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell6" tabindex="-1" _item_id="73"><span></span><span class="n">Model</span><span class="p">(</span>
+  <span class="p">(</span><span class="n">emb</span><span class="p">):</span> <span class="n">Embedding</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+  <span class="p">(</span><span class="n">layers</span><span class="p">):</span> <span class="n">ModuleList</span><span class="p">(</span>
+    <span class="p">(</span><span class="mi">0</span><span class="o">-</span><span class="mi">1</span><span class="p">):</span> <span class="mi">2</span> <span class="n">x</span> <span class="n">Layer</span><span class="p">(</span>
+      <span class="p">(</span><span class="n">lin</span><span class="p">):</span> <span class="n">Linear</span><span class="p">(</span><span class="n">in_features</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">out_features</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="p">)</span>
+  <span class="p">)</span>
+  <span class="p">(</span><span class="n">lm</span><span class="p">):</span> <span class="n">LMHead</span><span class="p">(</span>
+    <span class="p">(</span><span class="n">proj</span><span class="p">):</span> <span class="n">Linear</span><span class="p">(</span><span class="n">in_features</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">out_features</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">bias</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+  <span class="p">)</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="74">Let us see how the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API works:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell7" tabindex="-1" _item_id="75"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.pipelining</span><span class="w"> </span><span class="kn">import</span> <span class="n">pipeline</span><span class="p">,</span> <span class="n">SplitPoint</span>
+
+<span class="c1"># An example micro-batch input</span>
+<span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">LongTensor</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">])</span>
+
+<span class="n">pipe</span> <span class="o">=</span> <span class="n">pipeline</span><span class="p">(</span>
+    <span class="n">module</span><span class="o">=</span><span class="n">mod</span><span class="p">,</span>
+    <span class="n">mb_args</span><span class="o">=</span><span class="p">(</span><span class="n">x</span><span class="p">,),</span>
+    <span class="n">split_spec</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">"layers.1"</span><span class="p">:</span> <span class="n">SplitPoint</span><span class="o">.</span><span class="n">BEGINNING</span><span class="p">,</span>
+    <span class="p">}</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="76">The <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API splits your model given a <code class="docutils literal notranslate"><span class="pre">split_spec</span></code>, where
+<code class="docutils literal notranslate"><span class="pre">SplitPoint.BEGINNING</span></code> stands for adding a split point
+<em>before</em> execution of certain submodule in the <code class="docutils literal notranslate"><span class="pre">forward</span></code> function, and
+similarly, <code class="docutils literal notranslate"><span class="pre">SplitPoint.END</span></code> for split point <em>after</em> such.</p>
+<p _item_id="77">If we <code class="docutils literal notranslate"><span class="pre">print(pipe)</span></code>, we can see:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell8" tabindex="-1" _item_id="78"><span></span><span class="n">GraphModule</span><span class="p">(</span>
+  <span class="p">(</span><span class="n">submod_0</span><span class="p">):</span> <span class="n">GraphModule</span><span class="p">(</span>
+    <span class="p">(</span><span class="n">emb</span><span class="p">):</span> <span class="n">InterpreterModule</span><span class="p">()</span>
+    <span class="p">(</span><span class="n">layers</span><span class="p">):</span> <span class="n">Module</span><span class="p">(</span>
+      <span class="p">(</span><span class="mi">0</span><span class="p">):</span> <span class="n">InterpreterModule</span><span class="p">(</span>
+        <span class="p">(</span><span class="n">lin</span><span class="p">):</span> <span class="n">InterpreterModule</span><span class="p">()</span>
+      <span class="p">)</span>
+    <span class="p">)</span>
+  <span class="p">)</span>
+  <span class="p">(</span><span class="n">submod_1</span><span class="p">):</span> <span class="n">GraphModule</span><span class="p">(</span>
+    <span class="p">(</span><span class="n">layers</span><span class="p">):</span> <span class="n">Module</span><span class="p">(</span>
+      <span class="p">(</span><span class="mi">1</span><span class="p">):</span> <span class="n">InterpreterModule</span><span class="p">(</span>
+        <span class="p">(</span><span class="n">lin</span><span class="p">):</span> <span class="n">InterpreterModule</span><span class="p">()</span>
+      <span class="p">)</span>
+    <span class="p">)</span>
+    <span class="p">(</span><span class="n">lm</span><span class="p">):</span> <span class="n">InterpreterModule</span><span class="p">(</span>
+      <span class="p">(</span><span class="n">proj</span><span class="p">):</span> <span class="n">InterpreterModule</span><span class="p">()</span>
+    <span class="p">)</span>
+  <span class="p">)</span>
+<span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+    <span class="n">submod_0</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">submod_0</span><span class="p">(</span><span class="n">x</span><span class="p">);</span>  <span class="n">x</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">submod_1</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">submod_1</span><span class="p">(</span><span class="n">submod_0</span><span class="p">);</span>  <span class="n">submod_0</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">return</span> <span class="p">(</span><span class="n">submod_1</span><span class="p">,)</span>
+</pre></div>
+</div>
+<p _item_id="79">The “model partitions” are represented by submodules (<code class="docutils literal notranslate"><span class="pre">submod_0</span></code>,
+<code class="docutils literal notranslate"><span class="pre">submod_1</span></code>), each of which is reconstructed with original model operations, weights
+and hierarchies. In addition, a “root-level” <code class="docutils literal notranslate"><span class="pre">forward</span></code> function is
+reconstructed to capture the data flow between those partitions. Such data flow
+will be replayed by the pipeline runtime later, in a distributed fashion.</p>
+<p _item_id="80">The <code class="docutils literal notranslate"><span class="pre">Pipe</span></code> object provides a method for retrieving the “model partitions”:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell9" tabindex="-1" _item_id="81"><span></span><span class="n">stage_mod</span> <span class="p">:</span> <span class="n">nn</span><span class="o">.</span><span class="n">Module</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">get_stage_module</span><span class="p">(</span><span class="n">stage_idx</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="82">The returned <code class="docutils literal notranslate"><span class="pre">stage_mod</span></code> is a <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code>, with which you can create an
+optimizer, save or load checkpoints, or apply other parallelisms.</p>
+<p _item_id="83"><code class="docutils literal notranslate"><span class="pre">Pipe</span></code> also allows you to create a distributed stage runtime on a device given
+a <code class="docutils literal notranslate"><span class="pre">ProcessGroup</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell10" tabindex="-1" _item_id="84"><span></span><span class="n">stage</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">build_stage</span><span class="p">(</span><span class="n">stage_idx</span><span class="p">,</span> <span class="n">device</span><span class="p">,</span> <span class="n">group</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="85">Alternatively, if you would like to build the stage runtime later after some
+modification to the <code class="docutils literal notranslate"><span class="pre">stage_mod</span></code>, you can use a functional version of the
+<code class="docutils literal notranslate"><span class="pre">build_stage</span></code> API. For example:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell11" tabindex="-1" _item_id="86"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.pipelining</span><span class="w"> </span><span class="kn">import</span> <span class="n">build_stage</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.nn.parallel</span><span class="w"> </span><span class="kn">import</span> <span class="n">DistributedDataParallel</span>
+
+<span class="n">dp_mod</span> <span class="o">=</span> <span class="n">DistributedDataParallel</span><span class="p">(</span><span class="n">stage_mod</span><span class="p">)</span>
+<span class="n">info</span> <span class="o">=</span> <span class="n">pipe</span><span class="o">.</span><span class="n">info</span><span class="p">()</span>
+<span class="n">stage</span> <span class="o">=</span> <span class="n">build_stage</span><span class="p">(</span><span class="n">dp_mod</span><span class="p">,</span> <span class="n">stage_idx</span><span class="p">,</span> <span class="n">info</span><span class="p">,</span> <span class="n">device</span><span class="p">,</span> <span class="n">group</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title" _item_id="87">Note</p>
+<p _item_id="88">The <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> frontend uses a tracer (<code class="docutils literal notranslate"><span class="pre">torch.export</span></code>) to capture your
+model into a single graph. If your model is not full-graph’able, you can use
+our manual frontend below.</p>
+</div>
+</section></section><section id="hugging-face-examples"><h2 _item_id="89">Hugging Face Examples<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#hugging-face-examples" title="Link to this heading">#</a></h2>
+<p _item_id="90">In the <a class="reference external" href="https://github.com/pytorch/PiPPy">PiPPy</a> repo where this package was
+original created, we kept examples based on unmodified Hugging Face models.
+See the <a class="reference external" href="https://github.com/pytorch/PiPPy/tree/main/examples/huggingface">examples/huggingface</a> directory.</p>
+<p _item_id="91">Examples include:</p>
+<ul class="simple"><li><p _item_id="92"><a class="reference external" href="https://github.com/pytorch/PiPPy/tree/main/examples/huggingface/pippy_gpt2.py">GPT2</a></p></li>
+<li><p _item_id="93"><a class="reference external" href="https://github.com/pytorch/PiPPy/tree/main/examples/llama">Llama</a></p></li>
+</ul></section><section id="technical-deep-dive"><h2 _item_id="94">Technical Deep Dive<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#technical-deep-dive" title="Link to this heading">#</a></h2>
+<section id="how-does-the-pipeline-api-split-a-model"><h3 _item_id="95">How does the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API split a model?<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#how-does-the-pipeline-api-split-a-model" title="Link to this heading">#</a></h3>
+<p _item_id="96">First, the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API turns our model into a directed acyclic graph (DAG)
+by tracing the model. It traces the model using <code class="docutils literal notranslate"><span class="pre">torch.export</span></code> – a PyTorch 2
+full-graph capturing tool.</p>
+<p _item_id="97">Then, it groups together the <strong>operations and parameters</strong> needed by a stage
+into a reconstructed submodule: <code class="docutils literal notranslate"><span class="pre">submod_0</span></code>, <code class="docutils literal notranslate"><span class="pre">submod_1</span></code>, …</p>
+<p _item_id="98">Different from conventional submodule access methods like <code class="docutils literal notranslate"><span class="pre">Module.children()</span></code>,
+the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API does not only cut the module structure of your model, but
+also the <strong>forward</strong> function of your model.</p>
+<p _item_id="99">This is necessary because model structure like <code class="docutils literal notranslate"><span class="pre">Module.children()</span></code> merely
+captures information during <code class="docutils literal notranslate"><span class="pre">Module.__init__()</span></code>, and does not capture any
+information about <code class="docutils literal notranslate"><span class="pre">Module.forward()</span></code>. Said differently, <code class="docutils literal notranslate"><span class="pre">Module.children()</span></code>
+lacks information about the following aspects key to pipelininig:</p>
+<ul class="simple"><li><p _item_id="100">Execution order of child modules in <code class="docutils literal notranslate"><span class="pre">forward</span></code></p></li>
+<li><p _item_id="101">Activation flows between child modules</p></li>
+<li><p _item_id="102">Whether there are any functional operators between child modules (for example,
+<code class="docutils literal notranslate"><span class="pre">relu</span></code> or <code class="docutils literal notranslate"><span class="pre">add</span></code> operations will not be captured by <code class="docutils literal notranslate"><span class="pre">Module.children()</span></code>).</p></li>
+</ul><p _item_id="103">The <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API, on the contrary, makes sure that the <code class="docutils literal notranslate"><span class="pre">forward</span></code> behavior
+is truly preserved. It also captures the activation flow between the partitions,
+helping the distributed runtime to make correct send/receive calls without human
+intervention.</p>
+<p _item_id="104">Another flexibility of the <code class="docutils literal notranslate"><span class="pre">pipeline</span></code> API is that split points can be at
+arbitrary levels within your model hierarchy. In the split partitions, the original model
+hierarchy related to that partition will be reconstructed at no cost to you.
+At a result, fully-qualified names (FQNs) pointing to a submodule or parameter
+would be still valid, and services that relies on FQNs (such as FSDP, TP or
+checkpointing) can still run with your partitioned modules with almost zero code
+change.</p>
+</section></section><section id="implementing-your-own-schedule"><h2 _item_id="105">Implementing Your Own Schedule<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#implementing-your-own-schedule" title="Link to this heading">#</a></h2>
+<p _item_id="106">You can implement your own pipeline schedule by extending one of the following two classes:</p>
+<ul class="simple"><li><p _item_id="107"><code class="docutils literal notranslate"><span class="pre">PipelineScheduleSingle</span></code></p></li>
+<li><p _item_id="108"><code class="docutils literal notranslate"><span class="pre">PipelineScheduleMulti</span></code></p></li>
+</ul><p _item_id="109"><code class="docutils literal notranslate"><span class="pre">PipelineScheduleSingle</span></code> is for schedules that assigns <em>only one</em> stage per rank.
+<code class="docutils literal notranslate"><span class="pre">PipelineScheduleMulti</span></code> is for schedules that assigns multiple stages per rank.</p>
+<p _item_id="110">For example, <code class="docutils literal notranslate"><span class="pre">ScheduleGPipe</span></code> and <code class="docutils literal notranslate"><span class="pre">Schedule1F1B</span></code> are subclasses of <code class="docutils literal notranslate"><span class="pre">PipelineScheduleSingle</span></code>.
+Whereas, <code class="docutils literal notranslate"><span class="pre">ScheduleInterleaved1F1B</span></code>, <code class="docutils literal notranslate"><span class="pre">ScheduleLoopedBFS</span></code>, <code class="docutils literal notranslate"><span class="pre">ScheduleInterleavedZeroBubble</span></code>, and <code class="docutils literal notranslate"><span class="pre">ScheduleZBVZeroBubble</span></code>
+are subclasses of <code class="docutils literal notranslate"><span class="pre">PipelineScheduleMulti</span></code>.</p>
+</section><section id="logging"><h2 _item_id="111">Logging<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#logging" title="Link to this heading">#</a></h2>
+<p _item_id="112">You can turn on additional logging using the <code class="docutils literal notranslate"><span class="pre">TORCH_LOGS</span></code> environment variable from <a class="reference external" href="https://pytorch.org/docs/main/logging.html#module-torch._logging">torch._logging</a>:</p>
+<ul class="simple"><li><p _item_id="113"><code class="docutils literal notranslate"><span class="pre">TORCH_LOGS=+pp</span></code> will display <code class="docutils literal notranslate"><span class="pre">logging.DEBUG</span></code> messages and all levels above it.</p></li>
+<li><p _item_id="114"><code class="docutils literal notranslate"><span class="pre">TORCH_LOGS=pp</span></code> will display <code class="docutils literal notranslate"><span class="pre">logging.INFO</span></code> messages and above.</p></li>
+<li><p _item_id="115"><code class="docutils literal notranslate"><span class="pre">TORCH_LOGS=-pp</span></code> will display <code class="docutils literal notranslate"><span class="pre">logging.WARNING</span></code> messages and above.</p></li>
+</ul></section><section id="module-torch.distributed.pipelining"><h2 _item_id="116">API Reference<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#module-torch.distributed.pipelining" title="Link to this heading">#</a></h2>
+<section id="model-split-apis"><h3 _item_id="117">Model Split APIs<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#model-split-apis" title="Link to this heading">#</a></h3>
+<p _item_id="118">The following set of APIs transform your model into a pipeline representation.</p>
+<dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.SplitPoint" _item_id="119">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.</span></span><span class="sig-name descname"><span class="pre">SplitPoint</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/_IR.py#L1192"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.SplitPoint" title="Link to this definition">#</a></dt>
+<dd><p _item_id="120">Enum representing the points at which a split can occur in the execution of a submodule.
+:ivar BEGINNING: Represents adding a split point <em>before</em> the execution of a certain submodule in the <cite>forward</cite> function.
+:ivar END: Represents adding a split point <em>after</em> the execution of a certain submodule in the <cite>forward</cite> function.</p>
+</dd></dl><dl class="py function"><dt class="sig sig-object py" id="torch.distributed.pipelining.pipeline" _item_id="121">
+<span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.</span></span><span class="sig-name descname"><span class="pre">pipeline</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mb_args</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mb_kwargs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">split_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">split_policy</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/_IR.py#L1247"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.pipeline" title="Link to this definition">#</a></dt>
+<dd><p _item_id="122">Split a module based on a specification.</p>
+<p _item_id="123">See <cite>Pipe</cite> for more details.</p>
+<dl class="field-list simple"><dt class="field-odd" _item_id="124">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple"><li><p _item_id="125"><strong>module</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module" title="torch.nn.modules.module.Module"><em>Module</em></a>) – The module to be split.</p></li>
+<li><p _item_id="126"><strong>mb_args</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.14)"><em>Any</em></a><em>, </em><em>...</em><em>]</em>) – Example positional inputs, in micro-batch form.</p></li>
+<li><p _item_id="127"><strong>mb_kwargs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.14)"><em>Any</em></a><em>] </em><em>| </em><em>None</em>) – Example keyword inputs, in micro-batch form. (default: <cite>None</cite>)</p></li>
+<li><p _item_id="128"><strong>split_spec</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference internal" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.SplitPoint" title="torch.distributed.pipelining._IR.SplitPoint"><em>SplitPoint</em></a><em>] </em><em>| </em><em>None</em>) – A dictionary using submodule names as split marker. (default: <cite>None</cite>)</p></li>
+<li><p _item_id="129"><strong>split_policy</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Callable" title="(in Python v3.14)"><em>Callable</em></a><em>[</em><em>[</em><a class="reference internal" href="https://docs.pytorch.org/docs/main/fx.html#torch.fx.GraphModule" title="torch.fx.graph_module.GraphModule"><em>GraphModule</em></a><em>]</em><em>, </em><a class="reference internal" href="https://docs.pytorch.org/docs/main/fx.html#torch.fx.GraphModule" title="torch.fx.graph_module.GraphModule"><em>GraphModule</em></a><em>] </em><em>| </em><em>None</em>) – The policy to use for splitting the module. (default: <cite>None</cite>)</p></li>
+</ul></dd>
+<dt class="field-even" _item_id="130">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p _item_id="131">A pipeline representation of class <cite>Pipe</cite>.</p>
+</dd>
+</dl></dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.Pipe" _item_id="132">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.</span></span><span class="sig-name descname"><span class="pre">Pipe</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">split_gm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">has_loss_and_backward</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_spec</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/_IR.py#L561"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.Pipe" title="Link to this definition">#</a></dt>
+</dl><dl class="py function"><dt class="sig sig-object py" id="torch.distributed.pipelining.pipe_split" _item_id="133">
+<span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.</span></span><span class="sig-name descname"><span class="pre">pipe_split</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/_IR.py#L363"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.pipe_split" title="Link to this definition">#</a></dt>
+<dd><p _item_id="134">pipe_split is a special operator that is used to mark the boundary between
+stages in a module. It is used to split the module into stages. It is a
+no-op if your annotated module is run eagerly.</p>
+<p class="rubric" _item_id="135">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre id="codecell12" tabindex="-1" _item_id="136"><span></span><span class="gp">&gt;&gt;&gt; </span><span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<span class="gp">&gt;&gt;&gt; </span>    <span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">mm</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">mm_param</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span>    <span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">relu</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span>    <span class="n">pipe_split</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span>    <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">lin</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span>    <span class="k">return</span> <span class="n">x</span>
+</pre></div>
+</div>
+<p _item_id="137">The above example will be split into two stages.</p>
+</dd></dl></section><section id="module-torch.distributed.pipelining.microbatch"><h3 _item_id="138">Microbatch Utilities<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#module-torch.distributed.pipelining.microbatch" title="Link to this heading">#</a></h3>
+<dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.microbatch.TensorChunkSpec" _item_id="139">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.microbatch.</span></span><span class="sig-name descname"><span class="pre">TensorChunkSpec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">split_dim</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/microbatch.py#L60"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.microbatch.TensorChunkSpec" title="Link to this definition">#</a></dt>
+<dd><p _item_id="140">Class used to specify chunking of inputs</p>
+</dd></dl><dl class="py function"><dt class="sig sig-object py" id="torch.distributed.pipelining.microbatch.split_args_kwargs_into_chunks" _item_id="141">
+<span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.microbatch.</span></span><span class="sig-name descname"><span class="pre">split_args_kwargs_into_chunks</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chunks</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/microbatch.py#L378"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.microbatch.split_args_kwargs_into_chunks" title="Link to this definition">#</a></dt>
+<dd><p _item_id="142">Given a sequence of args and kwargs, split them into a number of chunks
+according to  their respective chunking specs.</p>
+<dl class="field-list simple"><dt class="field-odd" _item_id="143">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple"><li><p _item_id="144"><strong>args</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.14)"><em>Any</em></a><em>, </em><em>...</em><em>]</em>) – Tuple of args</p></li>
+<li><p _item_id="145"><strong>kwargs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.14)"><em>Any</em></a><em>] </em><em>| </em><em>None</em>) – Dict of kwargs</p></li>
+<li><p _item_id="146"><strong>chunks</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Number of chunks to split the args and kwargs into</p></li>
+<li><p _item_id="147"><strong>args_chunk_spec</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>[</em><a class="reference internal" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.microbatch.TensorChunkSpec" title="torch.distributed.pipelining.microbatch.TensorChunkSpec"><em>TensorChunkSpec</em></a><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>) – chunking specs for args, in same shape as args</p></li>
+<li><p _item_id="148"><strong>kwargs_chunk_spec</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference internal" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.microbatch.TensorChunkSpec" title="torch.distributed.pipelining.microbatch.TensorChunkSpec"><em>TensorChunkSpec</em></a><em>] </em><em>| </em><em>None</em>) – chunking specs for kwargs, in same shape as kwargs</p></li>
+</ul></dd>
+<dt class="field-even" _item_id="149">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p _item_id="150">List of sharded args
+kwargs_split: List of sharded kwargs</p>
+</dd>
+<dt class="field-odd" _item_id="151">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p _item_id="152">args_split</p>
+</dd>
+</dl></dd></dl><dl class="py function"><dt class="sig sig-object py" id="torch.distributed.pipelining.microbatch.merge_chunks" _item_id="153">
+<span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.microbatch.</span></span><span class="sig-name descname"><span class="pre">merge_chunks</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">chunks</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">chunk_spec</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/microbatch.py#L493"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.microbatch.merge_chunks" title="Link to this definition">#</a></dt>
+<dd><p _item_id="154">Given a list of chunks, merge them into a single value according to
+the chunk spec.</p>
+<dl class="field-list simple"><dt class="field-odd" _item_id="155">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple"><li><p _item_id="156"><strong>chunks</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.14)"><em>Any</em></a><em>]</em>) – list of chunks</p></li>
+<li><p _item_id="157"><strong>chunk_spec</strong> – Chunking spec for the chunks</p></li>
+</ul></dd>
+<dt class="field-even" _item_id="158">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p _item_id="159">Merged value</p>
+</dd>
+<dt class="field-odd" _item_id="160">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p _item_id="161">value</p>
+</dd>
+</dl></dd></dl></section><section id="module-torch.distributed.pipelining.stage"><h3 _item_id="162">Pipeline Stages<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#module-torch.distributed.pipelining.stage" title="Link to this heading">#</a></h3>
+<dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.stage.PipelineStage" _item_id="163">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.stage.</span></span><span class="sig-name descname"><span class="pre">PipelineStage</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">submodule</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_args</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_args</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dw_builder</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">get_mesh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/stage.py#L1737"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.stage.PipelineStage" title="Link to this definition">#</a></dt>
+<dd><p _item_id="164">A pipeline stage for pipeline parallelism with sequential model partitioning.</p>
+<p _item_id="165">Supports both <strong>static</strong> and <strong>dynamic</strong> metadata inference:</p>
+<dl class="simple"><dt _item_id="166">Static mode:</dt><dd><p _item_id="167">All of <code class="docutils literal notranslate"><span class="pre">input_args</span></code>, <code class="docutils literal notranslate"><span class="pre">output_args</span></code> (and <code class="docutils literal notranslate"><span class="pre">input_grads</span></code>/<code class="docutils literal notranslate"><span class="pre">output_grads</span></code>
+when DTensors are present) are provided at construction time.</p>
+</dd>
+<dt _item_id="168">Dynamic mode:</dt><dd><p _item_id="169">Metadata is inferred from the first microbatch at runtime; any
+statically provided args are used for validation only.</p>
+</dd>
+</dl><dl class="field-list simple"><dt class="field-odd" _item_id="170">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple"><li><p _item_id="171"><strong>submodule</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module" title="torch.nn.modules.module.Module"><em>Module</em></a>) – The <code class="docutils literal notranslate"><span class="pre">nn.Module</span></code> wrapped by this stage.</p></li>
+<li><p _item_id="172"><strong>stage_index</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Zero-based stage ID.</p></li>
+<li><p _item_id="173"><strong>num_stages</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Total number of stages in the pipeline.</p></li>
+<li><p _item_id="174"><strong>device</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/tensor_attributes.html#torch.device" title="torch.device"><em>device</em></a>) – Device this stage runs on.</p></li>
+<li><p _item_id="175"><strong>input_args</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>[</em><a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>) – Example input tensors (single tensor or tuple). Optional.</p></li>
+<li><p _item_id="176"><strong>output_args</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>[</em><a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>) – Example output tensors. Optional.</p></li>
+<li><p _item_id="177"><strong>output_grads</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>[</em><a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em> | </em><em>None</em><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>) – Example output gradients (received from next stage). Optional.</p></li>
+<li><p _item_id="178"><strong>input_grads</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>[</em><a class="reference internal" href="https://docs.pytorch.org/docs/main/tensors.html#torch.Tensor" title="torch.Tensor"><em>Tensor</em></a><em> | </em><em>None</em><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>) – Example input gradients (sent to previous stage). Optional.</p></li>
+<li><p _item_id="179"><strong>group</strong> (<em>ProcessGroup</em><em> | </em><em>None</em>) – Process group for P2P communication. Defaults to the
+world process group.</p></li>
+<li><p _item_id="180"><strong>dw_builder</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Callable" title="(in Python v3.14)"><em>Callable</em></a><em>[</em><em>[</em><em>]</em><em>, </em><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Callable" title="(in Python v3.14)"><em>Callable</em></a><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>None</em><em>]</em><em>] </em><em>| </em><em>None</em>) – Builder for deferred weight-update runners used by
+zero-bubble (F/I/W) schedules.</p></li>
+<li><p _item_id="181"><strong>get_mesh</strong> (<em>GetMeshCallback</em><em> | </em><em>None</em>) – <cite>GetMeshCallback</cite> used during
+dynamic DTensor inference. Ignored in fully static DTensor mode.</p></li>
+</ul></dd>
+</dl></dd></dl><dl class="py function"><dt class="sig sig-object py" id="torch.distributed.pipelining.stage.build_stage" _item_id="182">
+<span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.stage.</span></span><span class="sig-name descname"><span class="pre">build_stage</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage_module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pipe_info</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/stage.py#L1707"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.stage.build_stage" title="Link to this definition">#</a></dt>
+<dd><p _item_id="183">Create a pipeline stage given a stage_module to be wrapped by this stage
+and pipeline information.</p>
+<dl class="field-list simple"><dt class="field-odd" _item_id="184">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple"><li><p _item_id="185"><strong>stage_module</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module" title="torch.nn.Module"><em>torch.nn.Module</em></a>) – the module to be wrapped by this stage</p></li>
+<li><p _item_id="186"><strong>stage_index</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – the index of this stage in the pipeline</p></li>
+<li><p _item_id="187"><strong>pipe_info</strong> (<em>PipeInfo</em>) – information about the pipeline, can be retrieved by <cite>pipe.info()</cite></p></li>
+<li><p _item_id="188"><strong>device</strong> (<a class="reference internal" href="https://docs.pytorch.org/docs/main/tensor_attributes.html#torch.device" title="torch.device"><em>torch.device</em></a>) – the device to be used by this stage</p></li>
+<li><p _item_id="189"><strong>group</strong> (<em>Optional</em><em>[</em><em>dist.ProcessGroup</em><em>]</em>) – the process group to be used by this stage</p></li>
+</ul></dd>
+<dt class="field-even" _item_id="190">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p _item_id="191">a pipeline stage that can run with <cite>PipelineSchedules</cite>.</p>
+</dd>
+<dt class="field-odd" _item_id="192">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p _item_id="193">_PipelineStage</p>
+</dd>
+</dl></dd></dl></section><section id="module-torch.distributed.pipelining.schedules"><h3 _item_id="194">Pipeline Schedules<a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#module-torch.distributed.pipelining.schedules" title="Link to this heading">#</a></h3>
+<dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.ScheduleGPipe" _item_id="195">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">ScheduleGPipe</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L1083"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.ScheduleGPipe" title="Link to this definition">#</a></dt>
+<dd><p _item_id="196">The GPipe schedule.
+Will go through all the microbatches in a fill-drain manner.</p>
+</dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.Schedule1F1B" _item_id="197">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">Schedule1F1B</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L1206"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.Schedule1F1B" title="Link to this definition">#</a></dt>
+<dd><p _item_id="198">The 1F1B schedule.
+Will perform one forward and one backward on the microbatches in steady state.</p>
+</dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.ScheduleInterleaved1F1B" _item_id="199">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">ScheduleInterleaved1F1B</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">backward_requires_autograd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">defer_pp_recv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_active_stages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L3152"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.ScheduleInterleaved1F1B" title="Link to this definition">#</a></dt>
+<dd><p _item_id="200">The Interleaved 1F1B schedule.
+See <a class="reference external" href="https://arxiv.org/pdf/2104.04473">https://arxiv.org/pdf/2104.04473</a> for details.
+Will perform one forward and one backward on the microbatches in steady
+state and supports multiple stages per rank. When microbatches are ready for
+multiple local stages, Interleaved 1F1B prioritizes the earlier microbatch
+(also called “depth first”).</p>
+<p _item_id="201">This schedule is mostly similar to the original paper.
+It differs by being relaxing the requirement of num_microbatch % pp_size == 0.
+Using the flex_pp schedule, we will have num_rounds = max(1, n_microbatches // pp_group_size) and
+it works as long as n_microbatches % num_rounds is 0. As a few examples, support</p>
+<ol class="arabic simple"><li><p _item_id="202">pp_group_size = 4, n_microbatches = 10. We will have num_rounds = 2 and n_microbatches % 2 is 0.</p></li>
+<li><p _item_id="203">pp_group_size = 4, n_microbatches = 3. We will have num_rounds = 1 and n_microbatches % 1 is 0.</p></li>
+</ol></dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.ScheduleLoopedBFS" _item_id="204">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">ScheduleLoopedBFS</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">backward_requires_autograd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">defer_pp_recv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_active_stages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L2923"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.ScheduleLoopedBFS" title="Link to this definition">#</a></dt>
+<dd><p _item_id="205">Breadth-First Pipeline Parallelism.
+See <a class="reference external" href="https://arxiv.org/abs/2211.05953">https://arxiv.org/abs/2211.05953</a> for details.
+Similar to Interleaved 1F1B, Looped BFS supports multiple stages per rank.
+What is different is that when microbatches are ready for multiple local
+stages, Loops BFS will prioritizes the earlier stage, running all available
+microbatches at once.</p>
+</dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.ScheduleInterleavedZeroBubble" _item_id="206">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">ScheduleInterleavedZeroBubble</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">backward_requires_autograd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">defer_pp_recv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_active_stages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L3270"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.ScheduleInterleavedZeroBubble" title="Link to this definition">#</a></dt>
+<dd><p _item_id="207">The Interleaved Zero Bubble schedule.
+See <a class="reference external" href="https://arxiv.org/pdf/2401.10241">https://arxiv.org/pdf/2401.10241</a> for details.
+Will perform one forward and one backward on inputs for the microbatches in steady
+state and supports multiple stages per rank. Uses the backward for weights to fill in
+the pipeline bubble.</p>
+<p _item_id="208">In particular this is implementing the ZB1P schedule in the paper.</p>
+</dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.ScheduleZBVZeroBubble" _item_id="209">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">ScheduleZBVZeroBubble</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">backward_requires_autograd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">defer_pp_recv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_active_stages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L3464"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.ScheduleZBVZeroBubble" title="Link to this definition">#</a></dt>
+<dd><p _item_id="210">The Zero Bubble schedule (ZBV variant).
+See <a class="reference external" href="https://arxiv.org/pdf/2401.10241">https://arxiv.org/pdf/2401.10241</a> Section 6 for details.</p>
+<p _item_id="211">This schedules requires exactly two stages per rank.</p>
+<p _item_id="212">This schedule will perform one forward and one backward on inputs for the microbatches in steady
+state and supports multiple stages per rank. Uses backward with respect to weights to fill in
+the pipeline bubble.</p>
+<p _item_id="213">This ZB-V schedule would have the “zero bubble” property only if time forward == time backward input == time backward weights.
+In practice, this is not likely true for real models so alternatively
+a greedy scheduler could be implemented for unequal/unbalanced time.</p>
+</dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.ScheduleDualPipeV" _item_id="214">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">ScheduleDualPipeV</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">backward_requires_autograd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">defer_pp_recv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_active_stages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L3660"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.ScheduleDualPipeV" title="Link to this definition">#</a></dt>
+<dd><p _item_id="215">The DualPipeV schedule. A more efficient schedule variant based on the
+DualPipe schedule introduced by DeepSeek in <a class="reference external" href="https://arxiv.org/pdf/2412.19437">https://arxiv.org/pdf/2412.19437</a></p>
+<p _item_id="216">Based on the open sourced code from <a class="github reference external" href="https://github.com/deepseek-ai/DualPipe">deepseek-ai/DualPipe</a></p>
+</dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.PipelineScheduleSingle" _item_id="217">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">PipelineScheduleSingle</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L852"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.PipelineScheduleSingle" title="Link to this definition">#</a></dt>
+<dd><p _item_id="218">Base class for single-stage schedules.
+Implements the <cite>step</cite> method.
+Derived classes should implement <cite>_step_microbatches</cite>.</p>
+<p _item_id="219">Gradients are scaled by num_microbatches depending on the <cite>scale_grads</cite> argument, defaulting to True.  This setting
+should match the configuration of your loss_fn, which may either average losses (scale_grads=True)
+or sum losses (scale_grads=False).</p>
+<dl class="py method"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.PipelineScheduleSingle.step" _item_id="220">
+<span class="sig-name descname"><span class="pre">step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">losses</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_outputs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_kwargs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">arg_mbs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwarg_mbs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_mbs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L906"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.PipelineScheduleSingle.step" title="Link to this definition">#</a></dt>
+<dd><p _item_id="221">Run one training iteration of a single-stage pipeline schedule.</p>
+<p _item_id="222">By default, <code class="docutils literal notranslate"><span class="pre">args</span></code>, <code class="docutils literal notranslate"><span class="pre">kwargs</span></code>, and <code class="docutils literal notranslate"><span class="pre">target</span></code> are full-batch values
+that the schedule splits into microbatches. When the caller has already
+split inputs into microbatches, pass them through <code class="docutils literal notranslate"><span class="pre">arg_mbs</span></code>,
+<code class="docutils literal notranslate"><span class="pre">kwarg_mbs</span></code>, and <code class="docutils literal notranslate"><span class="pre">target_mbs</span></code> instead.</p>
+<dl class="field-list simple"><dt class="field-odd" _item_id="223">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple"><li><p _item_id="224"><strong>*args</strong> (<em>Any</em>) – Whole-batch positional inputs for the first pipeline
+stage. Do not pass positional inputs with pre-split inputs.</p></li>
+<li><p _item_id="225"><strong>target</strong> (<em>Any</em><em>, </em><em>optional</em>) – Whole-batch target for loss computation.
+When passing pre-split inputs, pass targets through
+<code class="docutils literal notranslate"><span class="pre">target_mbs</span></code> instead. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="226"><strong>losses</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>, </em><em>optional</em>) – Mutable list populated with one loss per
+microbatch when this schedule owns the last stage and a
+<code class="docutils literal notranslate"><span class="pre">loss_fn</span></code> was configured. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="227"><strong>return_outputs</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em>, </em><em>optional</em>) – Whether to merge and return output
+chunks on the last stage. Default: <code class="docutils literal notranslate"><span class="pre">True</span></code>.</p></li>
+<li><p _item_id="228"><strong>loss_kwargs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Extra keyword arguments forwarded to
+the configured <code class="docutils literal notranslate"><span class="pre">loss_fn</span></code>. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="229"><strong>arg_mbs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>]</em><em>, </em><em>optional</em>) – Pre-split positional inputs, one
+tuple per microbatch. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="230"><strong>kwarg_mbs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>]</em><em>, </em><em>optional</em>) – Pre-split keyword inputs, one
+dict per microbatch. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="231"><strong>target_mbs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>, </em><em>optional</em>) – Pre-split targets, one entry per
+microbatch. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="232"><strong>**kwargs</strong> (<em>Any</em>) – Whole-batch keyword inputs for the first pipeline
+stage. Do not pass keyword inputs with pre-split inputs.</p></li>
+</ul></dd>
+<dt class="field-even" _item_id="233">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><dl class="simple"><dt _item_id="234">The merged output from the last stage when this rank</dt><dd><p _item_id="235">owns the last stage and <code class="docutils literal notranslate"><span class="pre">return_outputs=True</span></code>; otherwise
+<code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd>
+</dl></dd>
+<dt class="field-odd" _item_id="236">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p _item_id="237">Any or None</p>
+</dd>
+<dt class="field-even" _item_id="238">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple"><li><p _item_id="239"><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError" title="(in Python v3.14)"><strong>RuntimeError</strong></a> – If backward computation is enabled and <code class="docutils literal notranslate"><span class="pre">step</span></code> is
+    called under <code class="docutils literal notranslate"><span class="pre">torch.no_grad()</span></code>. Use <code class="xref py py-meth docutils literal notranslate"><span class="pre">eval()</span></code> for
+    forward-only execution.</p></li>
+<li><p _item_id="240"><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#TypeError" title="(in Python v3.14)"><strong>TypeError</strong></a> – If a pre-split microbatch container has the wrong type.</p></li>
+<li><p _item_id="241"><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If whole-batch and pre-split inputs are mixed, or if a
+    pre-split container does not have one entry per microbatch.</p></li>
+</ul></dd>
+</dl><p _item_id="242">Examples:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre id="codecell13" tabindex="-1" _item_id="243"><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">output</span> <span class="o">=</span> <span class="n">schedule</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">mask</span><span class="o">=</span><span class="n">mask</span><span class="p">,</span> <span class="n">target</span><span class="o">=</span><span class="n">target</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">arg_mbs</span> <span class="o">=</span> <span class="p">[(</span><span class="n">x0</span><span class="p">,),</span> <span class="p">(</span><span class="n">x1</span><span class="p">,)]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">kwarg_mbs</span> <span class="o">=</span> <span class="p">[{</span><span class="s2">"mask"</span><span class="p">:</span> <span class="n">mask0</span><span class="p">},</span> <span class="p">{</span><span class="s2">"mask"</span><span class="p">:</span> <span class="n">mask1</span><span class="p">}]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">target_mbs</span> <span class="o">=</span> <span class="p">[</span><span class="n">target0</span><span class="p">,</span> <span class="n">target1</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">output</span> <span class="o">=</span> <span class="n">schedule</span><span class="o">.</span><span class="n">step</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">arg_mbs</span><span class="o">=</span><span class="n">arg_mbs</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">kwarg_mbs</span><span class="o">=</span><span class="n">kwarg_mbs</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">target_mbs</span><span class="o">=</span><span class="n">target_mbs</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl></dd></dl><dl class="py class"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.PipelineScheduleMulti" _item_id="244">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">PipelineScheduleMulti</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_microbatches</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_fn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">args_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_chunk_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_merge_spec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_full_backward</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale_grads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">backward_requires_autograd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L1960"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.PipelineScheduleMulti" title="Link to this definition">#</a></dt>
+<dd><p _item_id="245">Base class for multi-stage schedules.
+Implements the <cite>step</cite> method.</p>
+<p _item_id="246">Gradients are scaled by num_microbatches depending on the <cite>scale_grads</cite> argument, defaulting to True.  This setting
+should match the configuration of your loss_fn, which may either average losses (scale_grads=True)
+or sum losses (scale_grads=False).</p>
+<dl class="py method"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.PipelineScheduleMulti.step" _item_id="247">
+<span class="sig-name descname"><span class="pre">step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">losses</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_outputs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">loss_kwargs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">arg_mbs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwarg_mbs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_mbs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L2145"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.PipelineScheduleMulti.step" title="Link to this definition">#</a></dt>
+<dd><p _item_id="248">Run one training iteration of a multi-stage pipeline schedule.</p>
+<p _item_id="249">By default, <code class="docutils literal notranslate"><span class="pre">args</span></code>, <code class="docutils literal notranslate"><span class="pre">kwargs</span></code>, and <code class="docutils literal notranslate"><span class="pre">target</span></code> are full-batch values
+that the schedule splits into microbatches. When the caller has already
+split inputs into microbatches, pass them through <code class="docutils literal notranslate"><span class="pre">arg_mbs</span></code>,
+<code class="docutils literal notranslate"><span class="pre">kwarg_mbs</span></code>, and <code class="docutils literal notranslate"><span class="pre">target_mbs</span></code> instead.</p>
+<dl class="field-list simple"><dt class="field-odd" _item_id="250">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple"><li><p _item_id="251"><strong>*args</strong> (<em>Any</em>) – Whole-batch positional root inputs when this rank owns
+the first pipeline stage. Do not pass positional inputs with
+pre-split inputs.</p></li>
+<li><p _item_id="252"><strong>target</strong> (<em>Any</em><em>, </em><em>optional</em>) – Whole-batch target for loss computation.
+When passing pre-split inputs, pass targets through
+<code class="docutils literal notranslate"><span class="pre">target_mbs</span></code> instead. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="253"><strong>losses</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>, </em><em>optional</em>) – Mutable list populated with one loss per
+microbatch when this schedule owns the last stage and a
+<code class="docutils literal notranslate"><span class="pre">loss_fn</span></code> was configured. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="254"><strong>return_outputs</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em>, </em><em>optional</em>) – Whether to merge and return output
+chunks on the last stage. Default: <code class="docutils literal notranslate"><span class="pre">True</span></code>.</p></li>
+<li><p _item_id="255"><strong>loss_kwargs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>, </em><em>optional</em>) – Extra keyword arguments forwarded to
+the configured <code class="docutils literal notranslate"><span class="pre">loss_fn</span></code>. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="256"><strong>arg_mbs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><em>tuple</em></a><em>]</em><em>, </em><em>optional</em>) – Pre-split positional inputs, one
+tuple per microbatch. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="257"><strong>kwarg_mbs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>]</em><em>, </em><em>optional</em>) – Pre-split keyword inputs, one
+dict per microbatch. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="258"><strong>target_mbs</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>, </em><em>optional</em>) – Pre-split targets, one entry per
+microbatch. Default: <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></li>
+<li><p _item_id="259"><strong>**kwargs</strong> (<em>Any</em>) – Whole-batch keyword root inputs when this rank owns
+the first pipeline stage. Do not pass keyword inputs with
+pre-split inputs.</p></li>
+</ul></dd>
+<dt class="field-even" _item_id="260">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><dl class="simple"><dt _item_id="261">The merged output from the last stage when this rank</dt><dd><p _item_id="262">owns the last stage and <code class="docutils literal notranslate"><span class="pre">return_outputs=True</span></code>; otherwise
+<code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd>
+</dl></dd>
+<dt class="field-odd" _item_id="263">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p _item_id="264">Any or None</p>
+</dd>
+<dt class="field-even" _item_id="265">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple"><li><p _item_id="266"><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError" title="(in Python v3.14)"><strong>RuntimeError</strong></a> – If backward computation is enabled and <code class="docutils literal notranslate"><span class="pre">step</span></code> is
+    called under <code class="docutils literal notranslate"><span class="pre">torch.no_grad()</span></code>. Use <code class="xref py py-meth docutils literal notranslate"><span class="pre">eval()</span></code> for
+    forward-only execution.</p></li>
+<li><p _item_id="267"><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#TypeError" title="(in Python v3.14)"><strong>TypeError</strong></a> – If a pre-split microbatch container has the wrong type.</p></li>
+<li><p _item_id="268"><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If whole-batch and pre-split inputs are mixed, or if a
+    pre-split container does not have one entry per microbatch.</p></li>
+</ul></dd>
+</dl><p _item_id="269">Examples:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre id="codecell14" tabindex="-1" _item_id="270"><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">output</span> <span class="o">=</span> <span class="n">schedule</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">mask</span><span class="o">=</span><span class="n">mask</span><span class="p">,</span> <span class="n">target</span><span class="o">=</span><span class="n">target</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">arg_mbs</span> <span class="o">=</span> <span class="p">[(</span><span class="n">x0</span><span class="p">,),</span> <span class="p">(</span><span class="n">x1</span><span class="p">,)]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">kwarg_mbs</span> <span class="o">=</span> <span class="p">[{</span><span class="s2">"mask"</span><span class="p">:</span> <span class="n">mask0</span><span class="p">},</span> <span class="p">{</span><span class="s2">"mask"</span><span class="p">:</span> <span class="n">mask1</span><span class="p">}]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">target_mbs</span> <span class="o">=</span> <span class="p">[</span><span class="n">target0</span><span class="p">,</span> <span class="n">target1</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">output</span> <span class="o">=</span> <span class="n">schedule</span><span class="o">.</span><span class="n">step</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">arg_mbs</span><span class="o">=</span><span class="n">arg_mbs</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">kwarg_mbs</span><span class="o">=</span><span class="n">kwarg_mbs</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">target_mbs</span><span class="o">=</span><span class="n">target_mbs</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl></dd></dl><dl class="py function"><dt class="sig sig-object py" id="torch.distributed.pipelining.schedules.get_schedule_class" _item_id="271">
+<span class="sig-prename descclassname"><span class="pre">torch.distributed.pipelining.schedules.</span></span><span class="sig-name descname"><span class="pre">get_schedule_class</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">schedule_name</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/pytorch/pytorch/blob/fe3f518c806b6f1fb8acc283135e5414b8606887/torch/distributed/pipelining/schedules.py#L3889"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="https://docs.pytorch.org/docs/main/distributed.pipelining.html#torch.distributed.pipelining.schedules.get_schedule_class" title="Link to this definition">#</a></dt>
+<dd><p _item_id="272">Maps a schedule name (case insensitive) to its corresponding class object.</p>
+<dl class="field-list simple"><dt class="field-odd" _item_id="273">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p _item_id="274"><strong>schedule_name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The name of the schedule.</p>
+</dd>
+</dl></dd></dl></section></section></section></article></div>
+
+              
+              
+                </div>
+            
+            
+              
+                </div>
+          </main></div>
+  </div>
+  
+  
+  </body></html>

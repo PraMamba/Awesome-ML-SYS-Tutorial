@@ -1,0 +1,153 @@
+<html data-content_root="../" lang="en" data-mode="auto" data-theme="dark" data-version="v2.13.0+cu130" class="fontawesome-i2svg-active fontawesome-i2svg-complete"><body class="pytorch-body" data-feedback-url="https://github.com/pytorch/tutorials" data-bs-root-margin="0px 0px -60%" data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-default-mode="" data-offset="180"><div class="bd-container">
+<div class="bd-container__inner bd-page-width">
+<main class="bd-main" id="main-content" role="main"><div class="bd-content">
+<div class="bd-article-container">
+<div id="pytorch-article">
+
+<article class="bd-article"><section id="getting-started-with-devicemesh"><h1 _item_id="38">Getting Started with DeviceMesh<a class="headerlink" href="https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html#getting-started-with-devicemesh" title="Link to this heading">#</a></h1><div class="admonition note">
+<p class="admonition-title" _item_id="41">Note</p>
+<p _item_id="42"><a class="reference internal" href="./Getting%20Started%20with%20DeviceMesh%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/pencil-16.png"><img alt="edit" src="./Getting%20Started%20with%20DeviceMesh%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/pencil-16.png" style="width: 16px; height: 16px;"></a> View and edit this tutorial in <a class="reference external" href="https://github.com/pytorch/tutorials/blob/main/recipes_source/distributed_device_mesh.rst">github</a>.</p>
+</div>
+<p _item_id="43">Prerequisites:</p>
+<ul class="simple"><li><p _item_id="44"><a class="reference external" href="https://pytorch.org/docs/stable/distributed.html">Distributed Communication Package - torch.distributed</a></p></li>
+<li><p _item_id="45">Python 3.8 - 3.11</p></li>
+<li><p _item_id="46">PyTorch 2.2</p></li>
+</ul><p _item_id="47">Setting up distributed communicators, i.e. NVIDIA Collective Communication Library (NCCL) communicators, for distributed training can pose a significant challenge. For workloads where users need to compose different parallelisms,
+users would need to manually set up and manage NCCL communicators (for example, <code class="xref py py-class docutils literal notranslate"><span class="pre">ProcessGroup</span></code>) for each parallelism solution. This process could be complicated and susceptible to errors.
+<code class="xref py py-class docutils literal notranslate"><span class="pre">DeviceMesh</span></code> can simplify this process, making it more manageable and less prone to errors.</p>
+<section id="what-is-devicemesh"><h2 _item_id="48">What is DeviceMesh<a class="headerlink" href="https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html#what-is-devicemesh" title="Link to this heading">#</a></h2>
+<p _item_id="49"><code class="xref py py-class docutils literal notranslate"><span class="pre">DeviceMesh</span></code> is a higher level abstraction that manages <code class="xref py py-class docutils literal notranslate"><span class="pre">ProcessGroup</span></code>. It allows users to effortlessly
+create inter-node and intra-node process groups without worrying about how to set up ranks correctly for different sub process groups.
+Users can also easily manage the underlying process_groups/devices for multi-dimensional parallelism via <code class="xref py py-class docutils literal notranslate"><span class="pre">DeviceMesh</span></code>.</p>
+<figure class="align-center" _item_id="50"><a class="reference internal image-reference" href="./Getting%20Started%20with%20DeviceMesh%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/device_mesh.png"><img alt="PyTorch DeviceMesh" src="./Getting%20Started%20with%20DeviceMesh%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/device_mesh.png" style="width: 100%;"></a>
+</figure></section><section id="why-devicemesh-is-useful"><h2 _item_id="51">Why DeviceMesh is Useful<a class="headerlink" href="https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html#why-devicemesh-is-useful" title="Link to this heading">#</a></h2>
+<p _item_id="52">DeviceMesh is useful when working with multi-dimensional parallelism (i.e. 3-D parallel) where parallelism composability is required. For example, when your parallelism solutions require both communication across hosts and within each host.
+The image above shows that we can create a 2D mesh that connects the devices within each host, and connects each device with its counterpart on the other hosts in a homogeneous setup.</p>
+<p _item_id="53">Without DeviceMesh, users would need to manually set up NCCL communicators, cuda devices on each process before applying any parallelism, which could be quite complicated.
+The following code snippet illustrates a hybrid sharding 2-D Parallel pattern setup without <code class="xref py py-class docutils literal notranslate"><span class="pre">DeviceMesh</span></code>.
+First, we need to manually calculate the shard group and replicate group. Then, we need to assign the correct shard and
+replicate group to each rank.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell0" tabindex="-1" _item_id="54"><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+
+<span class="c1"># Understand world topology</span>
+<span class="n">rank</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"RANK"</span><span class="p">])</span>
+<span class="n">world_size</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"WORLD_SIZE"</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Running example on </span><span class="si">{</span><span class="n">rank</span><span class="si">=}</span><span class="s2"> in a world with </span><span class="si">{</span><span class="n">world_size</span><span class="si">=}</span><span class="s2">"</span><span class="p">)</span>
+
+<span class="c1"># Create process groups to manage 2-D like parallel pattern</span>
+<span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span><span class="s2">"nccl"</span><span class="p">)</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">set_device</span><span class="p">(</span><span class="n">rank</span><span class="p">)</span>
+
+<span class="c1"># Create shard groups (e.g. (0, 1, 2, 3), (4, 5, 6, 7))</span>
+<span class="c1"># and assign the correct shard group to each rank</span>
+<span class="n">num_node_devices</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">device_count</span><span class="p">()</span>
+<span class="n">shard_rank_lists</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">num_node_devices</span> <span class="o">//</span> <span class="mi">2</span><span class="p">)),</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">num_node_devices</span> <span class="o">//</span> <span class="mi">2</span><span class="p">,</span> <span class="n">num_node_devices</span><span class="p">))</span>
+<span class="n">shard_groups</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="n">shard_rank_lists</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span>
+    <span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="n">shard_rank_lists</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span>
+<span class="p">)</span>
+<span class="n">current_shard_group</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">shard_groups</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">rank</span> <span class="ow">in</span> <span class="n">shard_rank_lists</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">else</span> <span class="n">shard_groups</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="c1"># Create replicate groups (for example, (0, 4), (1, 5), (2, 6), (3, 7))</span>
+<span class="c1"># and assign the correct replicate group to each rank</span>
+<span class="n">current_replicate_group</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="n">shard_factor</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">shard_rank_lists</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_node_devices</span> <span class="o">//</span> <span class="mi">2</span><span class="p">):</span>
+    <span class="n">replicate_group_ranks</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">num_node_devices</span><span class="p">,</span> <span class="n">shard_factor</span><span class="p">))</span>
+    <span class="n">replicate_group</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="n">replicate_group_ranks</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">rank</span> <span class="ow">in</span> <span class="n">replicate_group_ranks</span><span class="p">:</span>
+        <span class="n">current_replicate_group</span> <span class="o">=</span> <span class="n">replicate_group</span>
+</pre></div>
+</div>
+<p _item_id="55">To run the above code snippet, we can leverage PyTorch Elastic. Let’s create a file named <code class="docutils literal notranslate"><span class="pre">2d_setup.py</span></code>.
+Then, run the following <a class="reference external" href="https://pytorch.org/docs/stable/elastic/quickstart.html">torch elastic/torchrun</a> command.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell1" tabindex="-1" _item_id="56"><span></span><span class="n">torchrun</span> <span class="o">--</span><span class="n">nproc_per_node</span><span class="o">=</span><span class="mi">8</span> <span class="o">--</span><span class="n">rdzv_id</span><span class="o">=</span><span class="mi">100</span> <span class="o">--</span><span class="n">rdzv_endpoint</span><span class="o">=</span><span class="n">localhost</span><span class="p">:</span><span class="mi">29400</span> <span class="mi">2</span><span class="n">d_setup</span><span class="o">.</span><span class="n">py</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title" _item_id="57">Note</p>
+<p _item_id="58">For simplicity of demonstration, we are simulating 2D parallel using only one node. Note that this code snippet can also be used when running on multi hosts setup.</p>
+</div>
+<p _item_id="59">With the help of <code class="xref py py-func docutils literal notranslate"><span class="pre">init_device_mesh()</span></code>, we can accomplish the above 2D setup in just two lines, and we can still
+access the underlying <code class="xref py py-class docutils literal notranslate"><span class="pre">ProcessGroup</span></code> if needed.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell2" tabindex="-1" _item_id="60"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+<span class="n">mesh_2d</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"replicate"</span><span class="p">,</span> <span class="s2">"shard"</span><span class="p">))</span>
+
+<span class="c1"># Users can access the underlying process group thru `get_group` API.</span>
+<span class="n">replicate_group</span> <span class="o">=</span> <span class="n">mesh_2d</span><span class="o">.</span><span class="n">get_group</span><span class="p">(</span><span class="n">mesh_dim</span><span class="o">=</span><span class="s2">"replicate"</span><span class="p">)</span>
+<span class="n">shard_group</span> <span class="o">=</span> <span class="n">mesh_2d</span><span class="o">.</span><span class="n">get_group</span><span class="p">(</span><span class="n">mesh_dim</span><span class="o">=</span><span class="s2">"shard"</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="61">Let’s create a file named <code class="docutils literal notranslate"><span class="pre">2d_setup_with_device_mesh.py</span></code>.
+Then, run the following <a class="reference external" href="https://pytorch.org/docs/stable/elastic/quickstart.html">torch elastic/torchrun</a> command.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell3" tabindex="-1" _item_id="62"><span></span><span class="n">torchrun</span> <span class="o">--</span><span class="n">nproc_per_node</span><span class="o">=</span><span class="mi">8</span> <span class="mi">2</span><span class="n">d_setup_with_device_mesh</span><span class="o">.</span><span class="n">py</span>
+</pre></div>
+</div>
+</section><section id="how-to-use-devicemesh-with-hsdp"><h2 _item_id="63">How to use DeviceMesh with HSDP<a class="headerlink" href="https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html#how-to-use-devicemesh-with-hsdp" title="Link to this heading">#</a></h2>
+<p _item_id="64">Hybrid Sharding Data Parallel(HSDP) is 2D strategy to perform FSDP within a host and DDP across hosts.</p>
+<p _item_id="65">Let’s see an example of how DeviceMesh can assist with applying HSDP to your model with a simple setup. With DeviceMesh,
+users would not need to manually create and manage shard group and replicate group.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell4" tabindex="-1" _item_id="66"><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.fsdp</span><span class="w"> </span><span class="kn">import</span> <span class="n">fully_shard</span> <span class="k">as</span> <span class="n">FSDP</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">ToyModel</span><span class="p">(</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">ToyModel</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">net1</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">relu</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">ReLU</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">net2</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">net2</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">relu</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">net1</span><span class="p">(</span><span class="n">x</span><span class="p">)))</span>
+
+
+<span class="c1"># HSDP: MeshShape(2, 4)</span>
+<span class="n">mesh_2d</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"dp_replicate"</span><span class="p">,</span> <span class="s2">"dp_shard"</span><span class="p">))</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">FSDP</span><span class="p">(</span>
+    <span class="n">ToyModel</span><span class="p">(),</span> <span class="n">device_mesh</span><span class="o">=</span><span class="n">mesh_2d</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="67">Let’s create a file named <code class="docutils literal notranslate"><span class="pre">hsdp.py</span></code>.
+Then, run the following <a class="reference external" href="https://pytorch.org/docs/stable/elastic/quickstart.html">torch elastic/torchrun</a> command.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell5" tabindex="-1" _item_id="68"><span></span><span class="n">torchrun</span> <span class="o">--</span><span class="n">nproc_per_node</span><span class="o">=</span><span class="mi">8</span> <span class="n">hsdp</span><span class="o">.</span><span class="n">py</span>
+</pre></div>
+</div>
+</section><section id="how-to-use-devicemesh-for-your-custom-parallel-solutions"><h2 _item_id="69">How to use DeviceMesh for your custom parallel solutions<a class="headerlink" href="https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html#how-to-use-devicemesh-for-your-custom-parallel-solutions" title="Link to this heading">#</a></h2>
+<p _item_id="70">When working with large scale training, you might have more complex custom parallel training composition. For example, you may need to slice out sub-meshes for different parallelism solutions.
+DeviceMesh allows users to slice child mesh from the parent mesh and re-use the NCCL communicators already created when the parent mesh is initialized.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell6" tabindex="-1" _item_id="71"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.device_mesh</span><span class="w"> </span><span class="kn">import</span> <span class="n">init_device_mesh</span>
+<span class="n">mesh_3d</span> <span class="o">=</span> <span class="n">init_device_mesh</span><span class="p">(</span><span class="s2">"cuda"</span><span class="p">,</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="n">mesh_dim_names</span><span class="o">=</span><span class="p">(</span><span class="s2">"replicate"</span><span class="p">,</span> <span class="s2">"shard"</span><span class="p">,</span> <span class="s2">"tp"</span><span class="p">))</span>
+
+<span class="c1"># Users can slice child meshes from the parent mesh.</span>
+<span class="n">hsdp_mesh</span> <span class="o">=</span> <span class="n">mesh_3d</span><span class="p">[</span><span class="s2">"replicate"</span><span class="p">,</span> <span class="s2">"shard"</span><span class="p">]</span>
+<span class="n">tp_mesh</span> <span class="o">=</span> <span class="n">mesh_3d</span><span class="p">[</span><span class="s2">"tp"</span><span class="p">]</span>
+
+<span class="c1"># Users can access the underlying process group thru `get_group` API.</span>
+<span class="n">replicate_group</span> <span class="o">=</span> <span class="n">hsdp_mesh</span><span class="p">[</span><span class="s2">"replicate"</span><span class="p">]</span><span class="o">.</span><span class="n">get_group</span><span class="p">()</span>
+<span class="n">shard_group</span> <span class="o">=</span> <span class="n">hsdp_mesh</span><span class="p">[</span><span class="s2">"shard"</span><span class="p">]</span><span class="o">.</span><span class="n">get_group</span><span class="p">()</span>
+<span class="n">tp_group</span> <span class="o">=</span> <span class="n">tp_mesh</span><span class="o">.</span><span class="n">get_group</span><span class="p">()</span>
+</pre></div>
+</div>
+</section><section id="conclusion"><h2 _item_id="72">Conclusion<a class="headerlink" href="https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html#conclusion" title="Link to this heading">#</a></h2>
+<p _item_id="73">In conclusion, we have learned about <code class="xref py py-class docutils literal notranslate"><span class="pre">DeviceMesh</span></code> and <code class="xref py py-func docutils literal notranslate"><span class="pre">init_device_mesh()</span></code>, as well as how
+they can be used to describe the layout of devices across the cluster.</p>
+<p _item_id="74">For more information, please see the following:</p>
+<ul class="simple"><li><p _item_id="75"><a class="reference external" href="https://github.com/pytorch/examples/blob/main/distributed/tensor_parallelism/fsdp_tp_example.py">2D parallel combining Tensor/Sequence Parallel with FSDP</a></p></li>
+<li><p _item_id="76"><a class="reference external" href="https://static.sched.com/hosted_files/pytorch2023/d1/%5BPTC%2023%5D%20Composable%20PyTorch%20Distributed%20with%20PT2.pdf">Composable PyTorch Distributed with PT2</a></p></li>
+</ul></section></section></article></div>
+</div>
+</div>
+</main></div>
+</div>
+
+</body></html>

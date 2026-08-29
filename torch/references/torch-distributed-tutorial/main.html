@@ -1,0 +1,533 @@
+<html data-content_root="../" lang="en" data-mode="auto" data-theme="dark" data-version="v2.13.0+cu130" class="fontawesome-i2svg-active fontawesome-i2svg-complete"><body class="pytorch-body" data-feedback-url="https://github.com/pytorch/tutorials" data-bs-root-margin="0px 0px -60%" data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-default-mode="" data-offset="180"><div class="bd-container">
+<div class="bd-container__inner bd-page-width">
+<main class="bd-main" id="main-content" role="main"><div class="bd-content">
+<div class="bd-article-container">
+<div id="pytorch-article">
+
+<article class="bd-article"><section id="writing-distributed-applications-with-pytorch"><h1 _item_id="37">Writing Distributed Applications with PyTorch<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#writing-distributed-applications-with-pytorch" title="Link to this heading">#</a></h1><div class="admonition note">
+<p class="admonition-title" _item_id="40">Note</p>
+<p _item_id="41"><a class="reference internal" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/pencil-16.png"><img alt="edit" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/pencil-16.png" style="width: 16px; height: 16px;"></a> View and edit this tutorial in <a class="reference external" href="https://github.com/pytorch/tutorials/blob/main/intermediate_source/dist_tuto.rst">github</a>.</p>
+</div>
+<p _item_id="42">Prerequisites:</p>
+<ul class="simple"><li><p _item_id="43"><a class="reference external" href="https://docs.pytorch.org/tutorials/beginner/dist_overview.html">PyTorch Distributed Overview</a></p></li>
+</ul><p _item_id="44">In this short tutorial, we will be going over the distributed package
+of PyTorch. We’ll see how to set up the distributed setting, use the
+different communication strategies, and go over some of the internals of
+the package.</p>
+<section id="setup"><h2 _item_id="45">Setup<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#setup" title="Link to this heading">#</a></h2>
+<p _item_id="46">The distributed package included in PyTorch (i.e.,
+<code class="docutils literal notranslate"><span class="pre">torch.distributed</span></code>) enables researchers and practitioners to easily
+parallelize their computations across processes and clusters of
+machines. To do so, it leverages message passing semantics
+allowing each process to communicate data to any of the other processes.
+As opposed to the multiprocessing (<code class="docutils literal notranslate"><span class="pre">torch.multiprocessing</span></code>) package,
+processes can use different communication backends and are not
+restricted to being executed on the same machine.</p>
+<p _item_id="47">In order to get started we need the ability to run multiple processes
+simultaneously. If you have access to compute cluster you should check
+with your local sysadmin or use your favorite coordination tool (e.g.,
+<a class="reference external" href="https://linux.die.net/man/1/pdsh">pdsh</a>,
+<a class="reference external" href="https://cea-hpc.github.io/clustershell/">clustershell</a>, or
+<a class="reference external" href="https://slurm.schedmd.com/">slurm</a>). For the purpose of this
+tutorial, we will use a single machine and spawn multiple processes using
+the following template.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell0" tabindex="-1" _item_id="48"><span></span><span class="sd">"""run.py:"""</span>
+<span class="c1">#!/usr/bin/env python</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.multiprocessing</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mp</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">size</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">""" Distributed function to be implemented later. """</span>
+    <span class="k">pass</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">init_process</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">fn</span><span class="p">,</span> <span class="n">backend</span><span class="o">=</span><span class="s1">'gloo'</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">""" Initialize the distributed environment. """</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s1">'MASTER_ADDR'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'127.0.0.1'</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s1">'MASTER_PORT'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'29500'</span>
+    <span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span><span class="n">backend</span><span class="p">,</span> <span class="n">rank</span><span class="o">=</span><span class="n">rank</span><span class="p">,</span> <span class="n">world_size</span><span class="o">=</span><span class="n">size</span><span class="p">)</span>
+    <span class="n">fn</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">size</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">world_size</span> <span class="o">=</span> <span class="mi">2</span>
+    <span class="n">processes</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">if</span> <span class="s2">"google.colab"</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">"Running in Google Colab"</span><span class="p">)</span>
+        <span class="n">mp</span><span class="o">.</span><span class="n">get_context</span><span class="p">(</span><span class="s2">"spawn"</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">mp</span><span class="o">.</span><span class="n">set_start_method</span><span class="p">(</span><span class="s2">"spawn"</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">rank</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">world_size</span><span class="p">):</span>
+        <span class="n">p</span> <span class="o">=</span> <span class="n">mp</span><span class="o">.</span><span class="n">Process</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">init_process</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">world_size</span><span class="p">,</span> <span class="n">run</span><span class="p">))</span>
+        <span class="n">p</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+        <span class="n">processes</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">processes</span><span class="p">:</span>
+        <span class="n">p</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+</pre></div>
+</div>
+<p _item_id="49">The above script spawns two processes who will each setup the
+distributed environment, initialize the process group
+(<code class="docutils literal notranslate"><span class="pre">dist.init_process_group</span></code>), and finally execute the given <code class="docutils literal notranslate"><span class="pre">run</span></code>
+function.</p>
+<p _item_id="50">Let’s have a look at the <code class="docutils literal notranslate"><span class="pre">init_process</span></code> function. It ensures that
+every process will be able to coordinate through a master, using the
+same ip address and port. Note that we used the <code class="docutils literal notranslate"><span class="pre">gloo</span></code> backend but
+other backends are available. (c.f.
+<a class="reference external" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#communication-backends">Section 5.1</a>) We will go over the magic
+happening in <code class="docutils literal notranslate"><span class="pre">dist.init_process_group</span></code> at the end of this tutorial,
+but it essentially allows processes to communicate with each other by
+sharing their locations.</p>
+</section><section id="point-to-point-communication"><h2 _item_id="51">Point-to-Point Communication<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#point-to-point-communication" title="Link to this heading">#</a></h2>
+<figure class="align-center" id="id1"><a class="reference internal image-reference" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/send_recv.png"><img alt="Send and Recv" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/send_recv.png" style="width: 100%;"></a>
+<figcaption><p _item_id="53"><span class="caption-text">Send and Recv</span><a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#id1" title="Link to this image">#</a></p>
+</figcaption></figure><p _item_id="54">A transfer of data from one process to another is called a
+point-to-point communication. These are achieved through the <code class="docutils literal notranslate"><span class="pre">send</span></code>
+and <code class="docutils literal notranslate"><span class="pre">recv</span></code> functions or their <em>immediate</em> counter-parts, <code class="docutils literal notranslate"><span class="pre">isend</span></code> and
+<code class="docutils literal notranslate"><span class="pre">irecv</span></code>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell1" tabindex="-1" _item_id="55"><span></span><span class="sd">"""Blocking point-to-point communication."""</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">size</span><span class="p">):</span>
+    <span class="n">tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">rank</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">tensor</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="c1"># Send the tensor to process 1</span>
+        <span class="n">dist</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">tensor</span><span class="o">=</span><span class="n">tensor</span><span class="p">,</span> <span class="n">dst</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="c1"># Receive tensor from process 0</span>
+        <span class="n">dist</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">tensor</span><span class="o">=</span><span class="n">tensor</span><span class="p">,</span> <span class="n">src</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">'Rank '</span><span class="p">,</span> <span class="n">rank</span><span class="p">,</span> <span class="s1">' has data '</span><span class="p">,</span> <span class="n">tensor</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+</pre></div>
+</div>
+<p _item_id="56">In the above example, both processes start with a zero tensor, then
+process 0 increments the tensor and sends it to process 1 so that they
+both end up with 1.0. Notice that process 1 needs to allocate memory in
+order to store the data it will receive.</p>
+<p _item_id="57">Also notice that <code class="docutils literal notranslate"><span class="pre">send/recv</span></code> are <strong>blocking</strong>: both processes block
+until the communication is completed. On the other hand immediates are
+<strong>non-blocking</strong>; the script continues its execution and the methods
+return a <code class="docutils literal notranslate"><span class="pre">Work</span></code> object upon which we can choose to
+<code class="docutils literal notranslate"><span class="pre">wait()</span></code>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell2" tabindex="-1" _item_id="58"><span></span><span class="sd">"""Non-blocking point-to-point communication."""</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">size</span><span class="p">):</span>
+    <span class="n">tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">req</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">rank</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">tensor</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="c1"># Send the tensor to process 1</span>
+        <span class="n">req</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">isend</span><span class="p">(</span><span class="n">tensor</span><span class="o">=</span><span class="n">tensor</span><span class="p">,</span> <span class="n">dst</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">'Rank 0 started sending'</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="c1"># Receive tensor from process 0</span>
+        <span class="n">req</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">irecv</span><span class="p">(</span><span class="n">tensor</span><span class="o">=</span><span class="n">tensor</span><span class="p">,</span> <span class="n">src</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">'Rank 1 started receiving'</span><span class="p">)</span>
+    <span class="n">req</span><span class="o">.</span><span class="n">wait</span><span class="p">()</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">'Rank '</span><span class="p">,</span> <span class="n">rank</span><span class="p">,</span> <span class="s1">' has data '</span><span class="p">,</span> <span class="n">tensor</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+</pre></div>
+</div>
+<p _item_id="59">When using immediates we have to be careful about how we use the sent and received tensors.
+Since we do not know when the data will be communicated to the other process,
+we should not modify the sent tensor nor access the received tensor before <code class="docutils literal notranslate"><span class="pre">req.wait()</span></code> has completed.
+In other words,</p>
+<ul class="simple"><li><p _item_id="60">writing to <code class="docutils literal notranslate"><span class="pre">tensor</span></code> after <code class="docutils literal notranslate"><span class="pre">dist.isend()</span></code> will result in undefined behaviour.</p></li>
+<li><p _item_id="61">reading from <code class="docutils literal notranslate"><span class="pre">tensor</span></code> after <code class="docutils literal notranslate"><span class="pre">dist.irecv()</span></code> will result in undefined
+behaviour, until <code class="docutils literal notranslate"><span class="pre">req.wait()</span></code> has been executed.</p></li>
+</ul><p _item_id="62">However, after <code class="docutils literal notranslate"><span class="pre">req.wait()</span></code>
+has been executed we are guaranteed that the communication took place,
+and that the value stored in <code class="docutils literal notranslate"><span class="pre">tensor[0]</span></code> is 1.0.</p>
+<p _item_id="63">Point-to-point communication is useful when we want more fine-grained
+control over the communication of our processes. They can be used to
+implement fancy algorithms, such as the one used in <a class="reference external" href="https://github.com/baidu-research/baidu-allreduce">Baidu’s
+DeepSpeech</a> or
+<a class="reference external" href="https://research.fb.com/publications/imagenet1kin1h/">Facebook’s large-scale
+experiments</a>.(c.f.
+<a class="reference external" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#our-own-ring-allreduce">Section 4.1</a>)</p>
+</section><section id="collective-communication"><h2 _item_id="64">Collective Communication<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#collective-communication" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table"><tbody><tr class="row-odd"><td><figure class="align-center" id="id2"><a class="reference internal image-reference" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/scatter.png"><img alt="Scatter" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/scatter.png" style="width: 100%;"></a>
+<figcaption><p _item_id="66"><span class="caption-text">Scatter</span><a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#id2" title="Link to this image">#</a></p>
+</figcaption></figure></td>
+<td><figure class="align-center" id="id3"><a class="reference internal image-reference" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/gather.png"><img alt="Gather" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/gather.png" style="width: 100%;"></a>
+<figcaption><p _item_id="68"><span class="caption-text">Gather</span><a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#id3" title="Link to this image">#</a></p>
+</figcaption></figure></td>
+</tr><tr class="row-even"><td><figure class="align-center" id="id4"><a class="reference internal image-reference" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/reduce.png"><img alt="Reduce" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/reduce.png" style="width: 100%;"></a>
+<figcaption><p _item_id="70"><span class="caption-text">Reduce</span><a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#id4" title="Link to this image">#</a></p>
+</figcaption></figure></td>
+<td><figure class="align-center" id="id5"><a class="reference internal image-reference" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/all_reduce.png"><img alt="All-Reduce" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/all_reduce.png" style="width: 100%;"></a>
+<figcaption><p _item_id="72"><span class="caption-text">All-Reduce</span><a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#id5" title="Link to this image">#</a></p>
+</figcaption></figure></td>
+</tr><tr class="row-odd"><td><figure class="align-center" id="id6"><a class="reference internal image-reference" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/broadcast.png"><img alt="Broadcast" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/broadcast.png" style="width: 100%;"></a>
+<figcaption><p _item_id="74"><span class="caption-text">Broadcast</span><a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#id6" title="Link to this image">#</a></p>
+</figcaption></figure></td>
+<td><figure class="align-center" id="id7"><a class="reference internal image-reference" href="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/all_gather.png"><img alt="All-Gather" src="./Writing%20Distributed%20Applications%20with%20PyTorch%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/all_gather.png" style="width: 100%;"></a>
+<figcaption><p _item_id="76"><span class="caption-text">All-Gather</span><a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#id7" title="Link to this image">#</a></p>
+</figcaption></figure></td>
+</tr></tbody></table></div>
+<p _item_id="77">As opposed to point-to-point communcation, collectives allow for
+communication patterns across all processes in a <strong>group</strong>. A group is a
+subset of all our processes. To create a group, we can pass a list of
+ranks to <code class="docutils literal notranslate"><span class="pre">dist.new_group(group)</span></code>. By default, collectives are executed
+on all processes, also known as the <strong>world</strong>. For example, in order
+to obtain the sum of all tensors on all processes, we can use the
+<code class="docutils literal notranslate"><span class="pre">dist.all_reduce(tensor,</span> <span class="pre">op,</span> <span class="pre">group)</span></code> collective.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell3" tabindex="-1" _item_id="78"><span></span><span class="sd">""" All-Reduce example."""</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">size</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">""" Simple collective communication. """</span>
+    <span class="n">group</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+    <span class="n">tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">dist</span><span class="o">.</span><span class="n">all_reduce</span><span class="p">(</span><span class="n">tensor</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">ReduceOp</span><span class="o">.</span><span class="n">SUM</span><span class="p">,</span> <span class="n">group</span><span class="o">=</span><span class="n">group</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">'Rank '</span><span class="p">,</span> <span class="n">rank</span><span class="p">,</span> <span class="s1">' has data '</span><span class="p">,</span> <span class="n">tensor</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+</pre></div>
+</div>
+<p _item_id="79">Since we want the sum of all tensors in the group, we use
+<code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.SUM</span></code> as the reduce operator. Generally speaking, any
+commutative mathematical operation can be used as an operator.
+Out-of-the-box, PyTorch comes with many such operators, all working at the
+element-wise level:</p>
+<ul class="simple"><li><p _item_id="80"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.SUM</span></code>,</p></li>
+<li><p _item_id="81"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.PRODUCT</span></code>,</p></li>
+<li><p _item_id="82"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.MAX</span></code>,</p></li>
+<li><p _item_id="83"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.MIN</span></code>,</p></li>
+<li><p _item_id="84"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.BAND</span></code>,</p></li>
+<li><p _item_id="85"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.BOR</span></code>,</p></li>
+<li><p _item_id="86"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.BXOR</span></code>,</p></li>
+<li><p _item_id="87"><code class="docutils literal notranslate"><span class="pre">dist.ReduceOp.PREMUL_SUM</span></code>.</p></li>
+</ul><p _item_id="88">The full list of supported operators is
+<a class="reference external" href="https://pytorch.org/docs/stable/distributed.html#torch.distributed.ReduceOp">here</a>.</p>
+<p _item_id="89">In addition to <code class="docutils literal notranslate"><span class="pre">dist.all_reduce(tensor,</span> <span class="pre">op,</span> <span class="pre">group)</span></code>, there are many additional collectives currently implemented in
+PyTorch. Here are a few supported collectives.</p>
+<ul class="simple"><li><p _item_id="90"><code class="docutils literal notranslate"><span class="pre">dist.broadcast(tensor,</span> <span class="pre">src,</span> <span class="pre">group)</span></code>: Copies <code class="docutils literal notranslate"><span class="pre">tensor</span></code> from
+<code class="docutils literal notranslate"><span class="pre">src</span></code> to all other processes.</p></li>
+<li><p _item_id="91"><code class="docutils literal notranslate"><span class="pre">dist.reduce(tensor,</span> <span class="pre">dst,</span> <span class="pre">op,</span> <span class="pre">group)</span></code>: Applies <code class="docutils literal notranslate"><span class="pre">op</span></code> to every
+<code class="docutils literal notranslate"><span class="pre">tensor</span></code> and stores the result in <code class="docutils literal notranslate"><span class="pre">dst</span></code>.</p></li>
+<li><p _item_id="92"><code class="docutils literal notranslate"><span class="pre">dist.all_reduce(tensor,</span> <span class="pre">op,</span> <span class="pre">group)</span></code>: Same as reduce, but the
+result is stored in all processes.</p></li>
+<li><p _item_id="93"><code class="docutils literal notranslate"><span class="pre">dist.scatter(tensor,</span> <span class="pre">scatter_list,</span> <span class="pre">src,</span> <span class="pre">group)</span></code>: Copies the
+<span class="math"><span><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>i</mi><mtext>th</mtext></msup></mrow><annotation encoding="application/x-tex">i^{\text{th}}</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height: 0.8491em;"></span><span class="mord"><span class="mord mathnormal">i</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8491em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight">th</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> tensor <code class="docutils literal notranslate"><span class="pre">scatter_list[i]</span></code> to the
+<span class="math"><span><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>i</mi><mtext>th</mtext></msup></mrow><annotation encoding="application/x-tex">i^{\text{th}}</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height: 0.8491em;"></span><span class="mord"><span class="mord mathnormal">i</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8491em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight">th</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> process.</p></li>
+<li><p _item_id="94"><code class="docutils literal notranslate"><span class="pre">dist.gather(tensor,</span> <span class="pre">gather_list,</span> <span class="pre">dst,</span> <span class="pre">group)</span></code>: Copies <code class="docutils literal notranslate"><span class="pre">tensor</span></code>
+from all processes in <code class="docutils literal notranslate"><span class="pre">dst</span></code>.</p></li>
+<li><p _item_id="95"><code class="docutils literal notranslate"><span class="pre">dist.all_gather(tensor_list,</span> <span class="pre">tensor,</span> <span class="pre">group)</span></code>: Copies <code class="docutils literal notranslate"><span class="pre">tensor</span></code>
+from all processes to <code class="docutils literal notranslate"><span class="pre">tensor_list</span></code>, on all processes.</p></li>
+<li><p _item_id="96"><code class="docutils literal notranslate"><span class="pre">dist.barrier(group)</span></code>: Blocks all processes in <cite>group</cite> until each one has entered this function.</p></li>
+<li><p _item_id="97"><code class="docutils literal notranslate"><span class="pre">dist.all_to_all(output_tensor_list,</span> <span class="pre">input_tensor_list,</span> <span class="pre">group)</span></code>: Scatters list of input tensors to all processes in
+a group and return gathered list of tensors in output list.</p></li>
+</ul><p _item_id="98">The full list of supported collectives can be found by looking at the latest documentation for PyTorch Distributed
+<a class="reference external" href="https://pytorch.org/docs/stable/distributed.html">(link)</a>.</p>
+</section><section id="distributed-training"><h2 _item_id="99">Distributed Training<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#distributed-training" title="Link to this heading">#</a></h2>
+<p _item_id="100"><strong>Note:</strong> You can find the example script of this section in <a class="reference external" href="https://github.com/seba-1511/dist_tuto.pth/">this
+GitHub repository</a>.</p>
+<p _item_id="101">Now that we understand how the distributed module works, let us write
+something useful with it. Our goal will be to replicate the
+functionality of
+<a class="reference external" href="https://pytorch.org/docs/stable/nn.html#torch.nn.parallel.DistributedDataParallel">DistributedDataParallel</a>.
+Of course, this will be a didactic example and in a real-world
+situation you should use the official, well-tested and well-optimized
+version linked above.</p>
+<p _item_id="102">Quite simply we want to implement a distributed version of stochastic
+gradient descent. Our script will let all processes compute the
+gradients of their model on their batch of data and then average their
+gradients. In order to ensure similar convergence results when changing
+the number of processes, we will first have to partition our dataset.
+(You could also use
+<a class="reference external" href="https://pytorch.org/docs/stable/data.html#torch.utils.data.random_split">torch.utils.data.random_split</a>,
+instead of the snippet below.)</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell4" tabindex="-1" _item_id="103"><span></span><span class="sd">""" Dataset partitioning helper """</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Partition</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">index</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">data</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">index</span> <span class="o">=</span> <span class="n">index</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">index</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">):</span>
+        <span class="n">data_idx</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">index</span><span class="p">[</span><span class="n">index</span><span class="p">]</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">[</span><span class="n">data_idx</span><span class="p">]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">DataPartitioner</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">sizes</span><span class="o">=</span><span class="p">[</span><span class="mf">0.7</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">],</span> <span class="n">seed</span><span class="o">=</span><span class="mi">1234</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">data</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">partitions</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">rng</span> <span class="o">=</span> <span class="n">Random</span><span class="p">()</span>  <span class="c1"># from random import Random</span>
+        <span class="n">rng</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span>
+        <span class="n">data_len</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+        <span class="n">indexes</span> <span class="o">=</span> <span class="p">[</span><span class="n">x</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">data_len</span><span class="p">)]</span>
+        <span class="n">rng</span><span class="o">.</span><span class="n">shuffle</span><span class="p">(</span><span class="n">indexes</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">frac</span> <span class="ow">in</span> <span class="n">sizes</span><span class="p">:</span>
+            <span class="n">part_len</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">frac</span> <span class="o">*</span> <span class="n">data_len</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">partitions</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">indexes</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="n">part_len</span><span class="p">])</span>
+            <span class="n">indexes</span> <span class="o">=</span> <span class="n">indexes</span><span class="p">[</span><span class="n">part_len</span><span class="p">:]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">use</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">partition</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">Partition</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">partitions</span><span class="p">[</span><span class="n">partition</span><span class="p">])</span>
+</pre></div>
+</div>
+<p _item_id="104">With the above snippet, we can now simply partition any dataset using
+the following few lines:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell5" tabindex="-1" _item_id="105"><span></span><span class="sd">""" Partitioning MNIST """</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">partition_dataset</span><span class="p">():</span>
+    <span class="n">dataset</span> <span class="o">=</span> <span class="n">datasets</span><span class="o">.</span><span class="n">MNIST</span><span class="p">(</span><span class="s1">'./data'</span><span class="p">,</span> <span class="n">train</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">download</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+                             <span class="n">transform</span><span class="o">=</span><span class="n">transforms</span><span class="o">.</span><span class="n">Compose</span><span class="p">([</span>
+                                 <span class="n">transforms</span><span class="o">.</span><span class="n">ToTensor</span><span class="p">(),</span>
+                                 <span class="n">transforms</span><span class="o">.</span><span class="n">Normalize</span><span class="p">((</span><span class="mf">0.1307</span><span class="p">,),</span> <span class="p">(</span><span class="mf">0.3081</span><span class="p">,))</span>
+                             <span class="p">]))</span>
+    <span class="n">size</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">get_world_size</span><span class="p">()</span>
+    <span class="n">bsz</span> <span class="o">=</span> <span class="mi">128</span> <span class="o">//</span> <span class="n">size</span>
+    <span class="n">partition_sizes</span> <span class="o">=</span> <span class="p">[</span><span class="mf">1.0</span> <span class="o">/</span> <span class="n">size</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">size</span><span class="p">)]</span>
+    <span class="n">partition</span> <span class="o">=</span> <span class="n">DataPartitioner</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="n">partition_sizes</span><span class="p">)</span>
+    <span class="n">partition</span> <span class="o">=</span> <span class="n">partition</span><span class="o">.</span><span class="n">use</span><span class="p">(</span><span class="n">dist</span><span class="o">.</span><span class="n">get_rank</span><span class="p">())</span>
+    <span class="n">train_set</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">DataLoader</span><span class="p">(</span><span class="n">partition</span><span class="p">,</span>
+                                         <span class="n">batch_size</span><span class="o">=</span><span class="n">bsz</span><span class="p">,</span>
+                                         <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">train_set</span><span class="p">,</span> <span class="n">bsz</span>
+</pre></div>
+</div>
+<p _item_id="106">Assuming we have 2 replicas, then each process will have a <code class="docutils literal notranslate"><span class="pre">train_set</span></code>
+of 60000 / 2 = 30000 samples. We also divide the batch size by the
+number of replicas in order to maintain the <em>overall</em> batch size of 128.</p>
+<p _item_id="107">We can now write our usual forward-backward-optimize training code, and
+add a function call to average the gradients of our models. (The
+following is largely inspired by the official <a class="reference external" href="https://github.com/pytorch/examples/blob/master/mnist/main.py">PyTorch MNIST
+example</a>.)</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell6" tabindex="-1" _item_id="108"><span></span><span class="sd">""" Distributed Synchronous SGD Example """</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="n">rank</span><span class="p">,</span> <span class="n">size</span><span class="p">):</span>
+    <span class="n">torch</span><span class="o">.</span><span class="n">manual_seed</span><span class="p">(</span><span class="mi">1234</span><span class="p">)</span>
+    <span class="n">train_set</span><span class="p">,</span> <span class="n">bsz</span> <span class="o">=</span> <span class="n">partition_dataset</span><span class="p">()</span>
+    <span class="n">model</span> <span class="o">=</span> <span class="n">Net</span><span class="p">()</span>
+    <span class="n">optimizer</span> <span class="o">=</span> <span class="n">optim</span><span class="o">.</span><span class="n">SGD</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span>
+                          <span class="n">lr</span><span class="o">=</span><span class="mf">0.01</span><span class="p">,</span> <span class="n">momentum</span><span class="o">=</span><span class="mf">0.5</span><span class="p">)</span>
+
+    <span class="n">num_batches</span> <span class="o">=</span> <span class="n">ceil</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">train_set</span><span class="o">.</span><span class="n">dataset</span><span class="p">)</span> <span class="o">/</span> <span class="nb">float</span><span class="p">(</span><span class="n">bsz</span><span class="p">))</span>
+    <span class="k">for</span> <span class="n">epoch</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">):</span>
+        <span class="n">epoch_loss</span> <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="k">for</span> <span class="n">data</span><span class="p">,</span> <span class="n">target</span> <span class="ow">in</span> <span class="n">train_set</span><span class="p">:</span>
+            <span class="n">optimizer</span><span class="o">.</span><span class="n">zero_grad</span><span class="p">()</span>
+            <span class="n">output</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+            <span class="n">loss</span> <span class="o">=</span> <span class="n">F</span><span class="o">.</span><span class="n">nll_loss</span><span class="p">(</span><span class="n">output</span><span class="p">,</span> <span class="n">target</span><span class="p">)</span>
+            <span class="n">epoch_loss</span> <span class="o">+=</span> <span class="n">loss</span><span class="o">.</span><span class="n">item</span><span class="p">()</span>
+            <span class="n">loss</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+            <span class="n">average_gradients</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+            <span class="n">optimizer</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">'Rank '</span><span class="p">,</span> <span class="n">dist</span><span class="o">.</span><span class="n">get_rank</span><span class="p">(),</span> <span class="s1">', epoch '</span><span class="p">,</span>
+              <span class="n">epoch</span><span class="p">,</span> <span class="s1">': '</span><span class="p">,</span> <span class="n">epoch_loss</span> <span class="o">/</span> <span class="n">num_batches</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="109">It remains to implement the <code class="docutils literal notranslate"><span class="pre">average_gradients(model)</span></code> function, which
+simply takes in a model and averages its gradients across the whole
+world.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell7" tabindex="-1" _item_id="110"><span></span><span class="sd">""" Gradient averaging. """</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">average_gradients</span><span class="p">(</span><span class="n">model</span><span class="p">):</span>
+    <span class="n">size</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">dist</span><span class="o">.</span><span class="n">get_world_size</span><span class="p">())</span>
+    <span class="k">for</span> <span class="n">param</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">():</span>
+        <span class="n">dist</span><span class="o">.</span><span class="n">all_reduce</span><span class="p">(</span><span class="n">param</span><span class="o">.</span><span class="n">grad</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">ReduceOp</span><span class="o">.</span><span class="n">SUM</span><span class="p">)</span>
+        <span class="n">param</span><span class="o">.</span><span class="n">grad</span><span class="o">.</span><span class="n">data</span> <span class="o">/=</span> <span class="n">size</span>
+</pre></div>
+</div>
+<p _item_id="111"><em>Et voilà</em>! We successfully implemented distributed synchronous SGD and
+could train any model on a large computer cluster.</p>
+<p _item_id="112"><strong>Note:</strong> While the last sentence is <em>technically</em> true, there are <a class="reference external" href="https://seba-1511.github.io/dist_blog">a
+lot more tricks</a> required to
+implement a production-level implementation of synchronous SGD. Again,
+use what <a class="reference external" href="https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html#torch.nn.parallel.DistributedDataParallel">has been tested and
+optimized</a>.</p>
+<section id="our-own-ring-allreduce"><h3 _item_id="113">Our Own Ring-Allreduce<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#our-own-ring-allreduce" title="Link to this heading">#</a></h3>
+<p _item_id="114">As an additional challenge, imagine that we wanted to implement
+DeepSpeech’s efficient ring allreduce. This is fairly easy to implement
+using point-to-point collectives.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell8" tabindex="-1" _item_id="115"><span></span><span class="sd">""" Implementation of a ring-reduce with addition. """</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">allreduce</span><span class="p">(</span><span class="n">send</span><span class="p">,</span> <span class="n">recv</span><span class="p">):</span>
+   <span class="n">rank</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">get_rank</span><span class="p">()</span>
+   <span class="n">size</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">get_world_size</span><span class="p">()</span>
+   <span class="n">send_buff</span> <span class="o">=</span> <span class="n">send</span><span class="o">.</span><span class="n">clone</span><span class="p">()</span>
+   <span class="n">recv_buff</span> <span class="o">=</span> <span class="n">send</span><span class="o">.</span><span class="n">clone</span><span class="p">()</span>
+   <span class="n">accum</span> <span class="o">=</span> <span class="n">send</span><span class="o">.</span><span class="n">clone</span><span class="p">()</span>
+
+   <span class="n">left</span> <span class="o">=</span> <span class="p">((</span><span class="n">rank</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">size</span><span class="p">)</span> <span class="o">%</span> <span class="n">size</span>
+   <span class="n">right</span> <span class="o">=</span> <span class="p">(</span><span class="n">rank</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="n">size</span>
+
+   <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">size</span> <span class="o">-</span> <span class="mi">1</span><span class="p">):</span>
+       <span class="k">if</span> <span class="n">i</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+           <span class="c1"># Send send_buff</span>
+           <span class="n">send_req</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">isend</span><span class="p">(</span><span class="n">send_buff</span><span class="p">,</span> <span class="n">right</span><span class="p">)</span>
+           <span class="n">dist</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">recv_buff</span><span class="p">,</span> <span class="n">left</span><span class="p">)</span>
+           <span class="n">accum</span><span class="p">[:]</span> <span class="o">+=</span> <span class="n">recv_buff</span><span class="p">[:]</span>
+       <span class="k">else</span><span class="p">:</span>
+           <span class="c1"># Send recv_buff</span>
+           <span class="n">send_req</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">isend</span><span class="p">(</span><span class="n">recv_buff</span><span class="p">,</span> <span class="n">right</span><span class="p">)</span>
+           <span class="n">dist</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">send_buff</span><span class="p">,</span> <span class="n">left</span><span class="p">)</span>
+           <span class="n">accum</span><span class="p">[:]</span> <span class="o">+=</span> <span class="n">send_buff</span><span class="p">[:]</span>
+       <span class="n">send_req</span><span class="o">.</span><span class="n">wait</span><span class="p">()</span>
+   <span class="n">recv</span><span class="p">[:]</span> <span class="o">=</span> <span class="n">accum</span><span class="p">[:]</span>
+</pre></div>
+</div>
+<p _item_id="116">In the above script, the <code class="docutils literal notranslate"><span class="pre">allreduce(send,</span> <span class="pre">recv)</span></code> function has a
+slightly different signature than the ones in PyTorch. It takes a
+<code class="docutils literal notranslate"><span class="pre">recv</span></code> tensor and will store the sum of all <code class="docutils literal notranslate"><span class="pre">send</span></code> tensors in it. As
+an exercise left to the reader, there is still one difference between
+our version and the one in DeepSpeech: their implementation divides the
+gradient tensor into <em>chunks</em>, so as to optimally utilize the
+communication bandwidth. (Hint:
+<a class="reference external" href="https://pytorch.org/docs/stable/torch.html#torch.chunk">torch.chunk</a>)</p>
+</section></section><section id="advanced-topics"><h2 _item_id="117">Advanced Topics<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#advanced-topics" title="Link to this heading">#</a></h2>
+<p _item_id="118">We are now ready to discover some of the more advanced functionalities
+of <code class="docutils literal notranslate"><span class="pre">torch.distributed</span></code>. Since there is a lot to cover, this section is
+divided into two subsections:</p>
+<ol class="arabic simple"><li><p _item_id="119">Communication Backends: where we learn how to use MPI and Gloo for
+GPU-GPU communication.</p></li>
+<li><p _item_id="120">Initialization Methods: where we understand how to best set up the
+initial coordination phase in <code class="docutils literal notranslate"><span class="pre">dist.init_process_group()</span></code>.</p></li>
+</ol><section id="communication-backends"><h3 _item_id="121">Communication Backends<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#communication-backends" title="Link to this heading">#</a></h3>
+<p _item_id="122">One of the most elegant aspects of <code class="docutils literal notranslate"><span class="pre">torch.distributed</span></code> is its ability
+to abstract and build on top of different backends. As mentioned before,
+there are multiple backends implemented in PyTorch. These backends can be easily selected
+using the <a class="reference external" href="https://pytorch.org/docs/stable/torch.html#accelerators">Accelerator API</a>,
+which provides a interface for working with different accelerator types.
+Some of the most popular backends are Gloo, NCCL, and MPI. They each have different specifications and tradeoffs, depending
+on the desired use case. A comparative table of supported functions can
+be found
+<a class="reference external" href="https://pytorch.org/docs/stable/distributed.html#module-torch.distributed">here</a>.</p>
+<p _item_id="123"><strong>Gloo Backend</strong></p>
+<p _item_id="124">So far we have made extensive usage of the <a class="reference external" href="https://github.com/facebookincubator/gloo">Gloo backend</a>.
+It is quite handy as a development platform, as it is included in
+the pre-compiled PyTorch binaries and works on both Linux (since 0.2)
+and macOS (since 1.3). It supports all point-to-point and collective
+operations on CPU, and all collective operations on GPU. The
+implementation of the collective operations for CUDA tensors is not as
+optimized as the ones provided by the NCCL backend.</p>
+<p _item_id="125">As you have surely noticed, our
+distributed SGD example does not work if you put <code class="docutils literal notranslate"><span class="pre">model</span></code> on the GPU.
+In order to use multiple GPUs, let us also make the following
+modifications:</p>
+<ol class="arabic simple"><li><p _item_id="126">Use Accelerator API <code class="docutils literal notranslate"><span class="pre">device_type</span> <span class="pre">=</span> <span class="pre">torch.accelerator.current_accelerator()</span></code></p></li>
+<li><p _item_id="127">Use <code class="docutils literal notranslate"><span class="pre">torch.device(f"{device_type}:{rank}")</span></code></p></li>
+<li><p _item_id="128"><code class="docutils literal notranslate"><span class="pre">model</span> <span class="pre">=</span> <span class="pre">Net()</span></code> <span class="math"><span><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo>→</mo></mrow><annotation encoding="application/x-tex">\rightarrow</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height: 0.3669em;"></span><span class="mrel">→</span></span></span></span></span></span> <code class="docutils literal notranslate"><span class="pre">model</span> <span class="pre">=</span> <span class="pre">Net().to(device)</span></code></p></li>
+<li><p _item_id="129">Use <code class="docutils literal notranslate"><span class="pre">data,</span> <span class="pre">target</span> <span class="pre">=</span> <span class="pre">data.to(device),</span> <span class="pre">target.to(device)</span></code></p></li>
+</ol><p _item_id="130">With these modifications, your model will now train across two GPUs.
+You can monitor GPU utilization using <code class="docutils literal notranslate"><span class="pre">watch</span> <span class="pre">nvidia-smi</span></code> if you are running on NVIDIA hardware.</p>
+<p _item_id="131"><strong>MPI Backend</strong></p>
+<p _item_id="132">The Message Passing Interface (MPI) is a standardized tool from the
+field of high-performance computing. It allows to do point-to-point and
+collective communications and was the main inspiration for the API of
+<code class="docutils literal notranslate"><span class="pre">torch.distributed</span></code>. Several implementations of MPI exist (e.g.
+<a class="reference external" href="https://www.open-mpi.org/">Open-MPI</a>,
+<a class="reference external" href="http://mvapich.cse.ohio-state.edu/">MVAPICH2</a>, <a class="reference external" href="https://software.intel.com/en-us/intel-mpi-library">Intel
+MPI</a>) each
+optimized for different purposes. The advantage of using the MPI backend
+lies in MPI’s wide availability - and high-level of optimization - on
+large computer clusters. <a class="reference external" href="https://developer.nvidia.com/mvapich">Some</a>
+<a class="reference external" href="https://developer.nvidia.com/ibm-spectrum-mpi">recent</a>
+<a class="reference external" href="https://www.open-mpi.org/">implementations</a> are also able to take
+advantage of CUDA IPC and GPU Direct technologies in order to avoid
+memory copies through the CPU.</p>
+<p _item_id="133">Unfortunately, PyTorch’s binaries cannot include an MPI implementation
+and we’ll have to recompile it by hand. Fortunately, this process is
+fairly simple given that upon compilation, PyTorch will look <em>by itself</em>
+for an available MPI implementation. The following steps install the MPI
+backend, by installing PyTorch <a class="reference external" href="https://github.com/pytorch/pytorch#from-source">from
+source</a>.</p>
+<ol class="arabic simple"><li><p _item_id="134">Create and activate your Anaconda environment, install all the
+pre-requisites following <a class="reference external" href="https://github.com/pytorch/pytorch#from-source">the
+guide</a>, but do
+<strong>not</strong> run <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">setup.py</span> <span class="pre">install</span></code> yet.</p></li>
+<li><p _item_id="135">Choose and install your favorite MPI implementation. Note that
+enabling CUDA-aware MPI might require some additional steps. In our
+case, we’ll stick to Open-MPI <em>without</em> GPU support:
+<code class="docutils literal notranslate"><span class="pre">conda</span> <span class="pre">install</span> <span class="pre">-c</span> <span class="pre">conda-forge</span> <span class="pre">openmpi</span></code></p></li>
+<li><p _item_id="136">Now, go to your cloned PyTorch repo and execute
+<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">setup.py</span> <span class="pre">install</span></code>.</p></li>
+</ol><p _item_id="137">In order to test our newly installed backend, a few modifications are
+required.</p>
+<ol class="arabic simple"><li><p _item_id="138">Replace the content under <code class="docutils literal notranslate"><span class="pre">if</span> <span class="pre">__name__</span> <span class="pre">==</span> <span class="pre">'__main__':</span></code> with
+<code class="docutils literal notranslate"><span class="pre">init_process(0,</span> <span class="pre">0,</span> <span class="pre">run,</span> <span class="pre">backend='mpi')</span></code>.</p></li>
+<li><p _item_id="139">Run <code class="docutils literal notranslate"><span class="pre">mpirun</span> <span class="pre">-n</span> <span class="pre">4</span> <span class="pre">python</span> <span class="pre">myscript.py</span></code>.</p></li>
+</ol><p _item_id="140">The reason for these changes is that MPI needs to create its own
+environment before spawning the processes. MPI will also spawn its own
+processes and perform the handshake described in <a class="reference external" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#initialization-methods">Initialization
+Methods</a>, making the <code class="docutils literal notranslate"><span class="pre">rank</span></code>and <code class="docutils literal notranslate"><span class="pre">size</span></code>
+arguments of <code class="docutils literal notranslate"><span class="pre">init_process_group</span></code> superfluous. This is actually quite
+powerful as you can pass additional arguments to <code class="docutils literal notranslate"><span class="pre">mpirun</span></code> in order to
+tailor computational resources for each process. (Things like number of
+cores per process, hand-assigning machines to specific ranks, and <a class="reference external" href="https://www.open-mpi.org/faq/?category=running#mpirun-hostfile">some
+more</a>)
+Doing so, you should obtain the same familiar output as with the other
+communication backends.</p>
+<p _item_id="141"><strong>NCCL Backend</strong></p>
+<p _item_id="142">The <a class="reference external" href="https://github.com/nvidia/nccl">NCCL backend</a> provides an
+optimized implementation of collective operations against CUDA
+tensors. If you only use CUDA tensors for your collective operations,
+consider using this backend for the best in class performance. The
+NCCL backend is included in the pre-built binaries with CUDA support.</p>
+<p _item_id="143"><strong>XCCL Backend</strong></p>
+<p _item_id="144">The <cite>XCCL backend</cite> offers an optimized implementation of collective operations for XPU tensors.
+If your workload uses only XPU tensors for collective operations,
+this backend provides best-in-class performance.
+The XCCL backend is included in the pre-built binaries with XPU support.</p>
+</section><section id="initialization-methods"><h3 _item_id="145">Initialization Methods<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/dist_tuto.html#initialization-methods" title="Link to this heading">#</a></h3>
+<p _item_id="146">To conclude this tutorial, let’s examine the initial function we invoked:
+<code class="docutils literal notranslate"><span class="pre">dist.init_process_group(backend,</span> <span class="pre">init_method)</span></code>. Specifically, we will discuss the various
+initialization methods responsible for the preliminary coordination step between each process.
+These methods enable you to define how this coordination is accomplished.</p>
+<p _item_id="147">The choice of initialization method depends on your hardware setup, and one method may be more
+suitable than others. In addition to the following sections, please refer to the <a class="reference external" href="https://pytorch.org/docs/stable/distributed.html#initialization">official
+documentation</a> for further information.</p>
+<p _item_id="148"><strong>Environment Variable</strong></p>
+<p _item_id="149">We have been using the environment variable initialization method
+throughout this tutorial. By setting the following four environment
+variables on all machines, all processes will be able to properly
+connect to the master, obtain information about the other processes, and
+finally handshake with them.</p>
+<ul class="simple"><li><p _item_id="150"><code class="docutils literal notranslate"><span class="pre">MASTER_PORT</span></code>: A free port on the machine that will host the
+process with rank 0.</p></li>
+<li><p _item_id="151"><code class="docutils literal notranslate"><span class="pre">MASTER_ADDR</span></code>: IP address of the machine that will host the process
+with rank 0.</p></li>
+<li><p _item_id="152"><code class="docutils literal notranslate"><span class="pre">WORLD_SIZE</span></code>: The total number of processes, so that the master
+knows how many workers to wait for.</p></li>
+<li><p _item_id="153"><code class="docutils literal notranslate"><span class="pre">RANK</span></code>: Rank of each process, so they will know whether it is the
+master or a worker.</p></li>
+</ul><p _item_id="154"><strong>Shared File System</strong></p>
+<p _item_id="155">The shared filesystem requires all processes to have access to a shared
+file system, and will coordinate them through a shared file. This means
+that each process will open the file, write its information, and wait
+until everybody did so. After that all required information will be
+readily available to all processes. In order to avoid race conditions,
+the file system must support locking through
+<a class="reference external" href="http://man7.org/linux/man-pages/man2/fcntl.2.html">fcntl</a>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell9" tabindex="-1" _item_id="156"><span></span><span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span>
+    <span class="n">init_method</span><span class="o">=</span><span class="s1">'file:///mnt/nfs/sharedfile'</span><span class="p">,</span>
+    <span class="n">rank</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">rank</span><span class="p">,</span>
+    <span class="n">world_size</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="157"><strong>TCP</strong></p>
+<p _item_id="158">Initializing via TCP can be achieved by providing the IP address of the process with rank 0 and a reachable port number.
+Here, all workers will be able to connect to the process
+with rank 0 and exchange information on how to reach each other.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell10" tabindex="-1" _item_id="159"><span></span><span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span>
+    <span class="n">init_method</span><span class="o">=</span><span class="s1">'tcp://10.1.1.20:23456'</span><span class="p">,</span>
+    <span class="n">rank</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">rank</span><span class="p">,</span>
+    <span class="n">world_size</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+</pre></div>
+</div>
+<center><p _item_id="160"><strong>Acknowledgements</strong></p>
+</center><p _item_id="161">I’d like to thank the PyTorch developers for doing such a good job on
+their implementation, documentation, and tests. When the code was
+unclear, I could always count on the
+<a class="reference external" href="https://pytorch.org/docs/stable/distributed.html">docs</a> or the
+<a class="reference external" href="https://github.com/pytorch/pytorch/tree/master/test/distributed">tests</a>
+to find an answer. In particular, I’d like to thank Soumith Chintala,
+Adam Paszke, and Natalia Gimelshein for providing insightful comments
+and answering questions on early drafts.</p>
+</section></section></section></article></div>
+</div>
+</div>
+</main></div>
+</div>
+
+</body></html>

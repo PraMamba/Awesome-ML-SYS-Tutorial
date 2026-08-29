@@ -1,0 +1,300 @@
+<html data-content_root="../" lang="en" data-mode="auto" data-theme="dark" data-version="v2.13.0+cu130" class="fontawesome-i2svg-active fontawesome-i2svg-complete"><body class="pytorch-body" data-feedback-url="https://github.com/pytorch/tutorials" data-bs-root-margin="0px 0px -60%" data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-default-mode="" data-offset="180"><div class="bd-container">
+<div class="bd-container__inner bd-page-width">
+<main class="bd-main" id="main-content" role="main"><div class="bd-content">
+<div class="bd-article-container">
+<div id="pytorch-article">
+
+<article class="bd-article"><section id="getting-started-with-fully-sharded-data-parallel-fsdp2"><h1 _item_id="38">Getting Started with Fully Sharded Data Parallel (FSDP2)<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#getting-started-with-fully-sharded-data-parallel-fsdp2" title="Link to this heading">#</a></h1><div class="admonition note">
+<p class="admonition-title" _item_id="41">Note</p>
+<p _item_id="42"><a class="reference internal" href="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/pencil-16.png"><img alt="edit" src="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/pencil-16.png" style="width: 16px; height: 16px;"></a> Check out the code in this tutorial from <a class="reference external" href="https://github.com/pytorch/examples/tree/main/distributed/FSDP2">pytorch/examples</a>. FSDP1 is deprecated. FSDP1 tutorials are archived in <a class="reference external" href="https://docs.pytorch.org/tutorials/intermediate/FSDP1_tutorial.html">[1]</a> and <a class="reference external" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_advanced_tutorial.html">[2]</a></p>
+</div>
+<section id="how-fsdp2-works"><h2 _item_id="43">How FSDP2 works<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#how-fsdp2-works" title="Link to this heading">#</a></h2>
+<p _item_id="44">In <a class="reference external" href="https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html">DistributedDataParallel</a> (DDP) training, each rank owns a model replica and processes a batch of data, finally it uses all-reduce to sync gradients across ranks.</p>
+<p _item_id="45">Comparing with DDP, FSDP reduces GPU memory footprint by sharding model parameters, gradients, and optimizer states. It makes it feasible to train models that cannot fit on a single GPU. As shown below in the picture,</p>
+<ul class="simple"><li><p _item_id="46">Outside of forward and backward computation, parameters are fully sharded</p></li>
+<li><p _item_id="47">Before forward and backward, sharded parameters are all-gathered into unsharded parameters</p></li>
+<li><p _item_id="48">Inside backward, local unsharded gradients are reduce-scatterred into sharded gradients</p></li>
+<li><p _item_id="49">Optimizer updates sharded parameters with sharded gradients, resulting in sharded optimizer states</p></li>
+</ul><figure class="align-center" _item_id="50"><a class="reference internal image-reference" href="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/fsdp_workflow.png"><img alt="FSDP workflow" src="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/fsdp_workflow.png" style="width: 100%;"></a>
+</figure><p _item_id="51">FSDP can be considered a decomposition of DDP’s all-reduce into reduce-scatter and all-gather operations</p>
+<figure class="align-center" _item_id="52"><a class="reference internal image-reference" href="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/fsdp_sharding.png"><img alt="FSDP all-gather and reduce-scatter" src="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/fsdp_sharding.png" style="width: 100%;"></a>
+</figure><p _item_id="53">Comparing with <a class="reference external" href="https://docs.pytorch.org/docs/stable/fsdp.html">FSDP1</a>, FSDP2 has following advantages:</p>
+<ul class="simple"><li><p _item_id="54">Representing sharded parameters as <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.tensor.html">DTensor</a> sharded on dim-i, allowing for easy manipulation of individual parameters, communication-free sharded state dicts, and a simpler meta-device initialization flow.</p></li>
+<li><p _item_id="55">Improving memory management system that achieves lower and deterministic GPU memory by avoiding <code class="docutils literal notranslate"><span class="pre">recordStream</span></code> (<a class="reference external" href="https://dev-discuss.pytorch.org/t/fsdp-cudacachingallocator-an-outsider-newb-perspective/1486">doc</a>) and does so without any CPU synchronization.</p></li>
+<li><p _item_id="56">Offering a tensor subclass extension point to customize the all-gather, e.g. for float8 all-gather for float8 linears (<a class="reference external" href="https://dev-discuss.pytorch.org/t/enabling-float8-all-gather-in-fsdp2/2359">doc</a>), and NF4 for QLoRA (<a class="reference external" href="https://github.com/pytorch/torchtune/blob/main/README.md">doc</a>)</p></li>
+<li><p _item_id="57">Mixing frozen and non-frozen parameters can in the same communication group without using extra memory.</p></li>
+</ul></section><section id="how-to-use-fsdp2"><h2 _item_id="58">How to use FSDP2<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#how-to-use-fsdp2" title="Link to this heading">#</a></h2>
+<section id="model-initialization"><h3 _item_id="59">Model Initialization<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#model-initialization" title="Link to this heading">#</a></h3>
+<p _item_id="60"><strong>Applying fully_shard on submodules</strong>: Different from DDP, we should apply <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html">fully_shard</a> on submodules as well as the root model. In the transformer example below, we applied <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> on each layer first, then the root model</p>
+<ul class="simple"><li><p _item_id="61">During forward computation of <code class="docutils literal notranslate"><span class="pre">layers[i]</span></code>, the rest of the layers are sharded to reduce memory footprint</p></li>
+<li><p _item_id="62">Inside <code class="docutils literal notranslate"><span class="pre">fully_shard(model)</span></code>, FSDP2 excludes parameters from <code class="docutils literal notranslate"><span class="pre">model.layers</span></code> and classify remaining parameters into a parameter group for performant all-gather and reduce-scatter</p></li>
+<li><p _item_id="63"><code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> moves sharded model to actual training device (eg <code class="docutils literal notranslate"><span class="pre">cuda</span></code>)</p></li>
+</ul><p _item_id="64"><strong>Command</strong>: <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--nproc_per_node</span> <span class="pre">2</span> <span class="pre">train.py</span></code></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell0" tabindex="-1" _item_id="65"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.fsdp</span><span class="w"> </span><span class="kn">import</span> <span class="n">fully_shard</span><span class="p">,</span> <span class="n">FSDPModule</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">Transformer</span><span class="p">()</span>
+<span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>
+    <span class="n">fully_shard</span><span class="p">(</span><span class="n">layer</span><span class="p">)</span>
+<span class="n">fully_shard</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+<span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">Transformer</span><span class="p">)</span>
+<span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">FSDPModule</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+<span class="c1">#  FSDPTransformer(</span>
+<span class="c1">#    (tok_embeddings): Embedding(...)</span>
+<span class="c1">#    ...</span>
+<span class="c1">#    (layers): 3 x FSDPTransformerBlock(...)</span>
+<span class="c1">#    (output): Linear(...)</span>
+<span class="c1">#  )</span>
+</pre></div>
+</div>
+<p _item_id="66">We can inspect the nested wrapping with <code class="docutils literal notranslate"><span class="pre">print(model)</span></code>. <code class="docutils literal notranslate"><span class="pre">FSDPTransformer</span></code> is a joint class of <a class="reference external" href="https://github.com/pytorch/examples/blob/70922969e70218458d2a945bf86fd8cc967fc6ea/distributed/FSDP2/model.py#L100">Transformer</a> and <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule">FSDPModule</a>. The same thing happens to <a class="reference external" href="https://github.com/pytorch/examples/blob/70922969e70218458d2a945bf86fd8cc967fc6ea/distributed/FSDP2/model.py#L76C7-L76C18">FSDPTransformerBlock</a>. All FSDP2 public APIs are exposed through <code class="docutils literal notranslate"><span class="pre">FSDPModule</span></code>. For example, users can call <code class="docutils literal notranslate"><span class="pre">model.unshard()</span></code> to manually control all-gather schedules. See “explicit prefetching” below for details.</p>
+<p _item_id="67"><strong>model.parameters() as DTensor</strong>: <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> shards parameters across ranks, and convert <code class="docutils literal notranslate"><span class="pre">model.parameters()</span></code> from plain <code class="docutils literal notranslate"><span class="pre">torch.Tensor</span></code> to DTensor to represent sharded parameters. FSDP2 shards on dim-0 by default so DTensor placements are <cite>Shard(dim=0)</cite>. Say we have N ranks and a parameter with N rows before sharding. After sharding, each rank will have 1 row of the parameter. We can inspect sharded parameters using <code class="docutils literal notranslate"><span class="pre">param.to_local()</span></code>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell1" tabindex="-1" _item_id="68"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.tensor</span><span class="w"> </span><span class="kn">import</span> <span class="n">DTensor</span>
+<span class="k">for</span> <span class="n">param</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">():</span>
+    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">param</span><span class="p">,</span> <span class="n">DTensor</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">param</span><span class="o">.</span><span class="n">placements</span> <span class="o">==</span> <span class="p">(</span><span class="n">Shard</span><span class="p">(</span><span class="mi">0</span><span class="p">),)</span>
+    <span class="c1"># inspect sharded parameters with param.to_local()</span>
+
+<span class="n">optim</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">optim</span><span class="o">.</span><span class="n">Adam</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span> <span class="n">lr</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="69">Note the optimizer is constructed after applying <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code>. Both model and optimizer state dicts are represented in DTensor.</p>
+<p _item_id="70">DTensor facilitates optimizer, gradient clipping and checkpointing</p>
+<ul class="simple"><li><p _item_id="71"><code class="docutils literal notranslate"><span class="pre">torch.optim.Adam</span></code> and <code class="docutils literal notranslate"><span class="pre">torch.nn.utils.clip_grad_norm_</span></code> works out of the box for DTensor parameters. It makes the code consistent between single-device and distributed training</p></li>
+<li><p _item_id="72">we can use DTensor and DCP APIs to manipulate parameters to get full state dict, see “state dict” section below for details. For distributed state dicts, we can save/load checkpoints (<a class="reference external" href="https://docs.pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html">doc</a>) without extra communication</p></li>
+</ul></section><section id="forward-backward-with-prefetching"><h3 _item_id="73">Forward/Backward with Prefetching<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#forward-backward-with-prefetching" title="Link to this heading">#</a></h3>
+<p _item_id="74"><strong>command</strong>: <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--nproc_per_node</span> <span class="pre">2</span> <span class="pre">train.py</span></code></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell2" tabindex="-1" _item_id="75"><span></span><span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">epochs</span><span class="p">):</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">vocab_size</span><span class="p">,</span> <span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">seq_len</span><span class="p">),</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+    <span class="n">loss</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+    <span class="n">loss</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+    <span class="n">optim</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+    <span class="n">optim</span><span class="o">.</span><span class="n">zero_grad</span><span class="p">()</span>
+</pre></div>
+</div>
+<p _item_id="76"><code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> registers forward/backward hooks to all-gather parameters before computation, and reshards parameters after computation. To overlap all-gathers with computation, FSDP2 offers <strong>implicit prefetching</strong> that works out of the box with the training loop above and <strong>explicit prefetching</strong> for advanced users to control all-gather schedules manually.</p>
+<p _item_id="77"><strong>Implicit Prefetching</strong>: CPU thread issues all-gather i before layer i. All-gathers are queued into its own cuda stream while layer i computation happens in the default stream. For non-cpu-bound workload (eg Transformer with big batch size), all-gather i+1 can overlap with computation for layer i. Implicit prefetching works similarly in the backward, except all-gathers are issued in the reverse of post-forward order.</p>
+<figure class="align-center" _item_id="78"><a class="reference internal image-reference" href="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/fsdp_implicit.png"><img alt="FSDP Implicit" src="./Getting%20Started%20with%20Fully%20Sharded%20Data%20Parallel%20(FSDP2)%20%E2%80%94%20PyTorch%20Tutorials%202.13.0+cu130%20documentation_files/fsdp_implicit.png" style="width: 100%;"></a>
+</figure><p _item_id="79">We recommend users to start with implicit prefetching to understand the performance out of the box.</p>
+<p _item_id="80"><strong>Explicit Prefetching</strong>: Users can specify forward ordering with <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule.set_modules_to_forward_prefetch">set_modules_to_forward_prefetch</a>, and backward ordering with <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule.set_modules_to_backward_prefetch">set_modules_to_backward_prefetch</a>. As shown in the code below, CPU thread issue all-gather i + 1 and i + 2 at layer i</p>
+<p _item_id="81">Explicit prefetching works well in following situation:</p>
+<p _item_id="82"><strong>CPU-bound workload</strong>: If using implicit prefetching, CPU thread will be too slow to issue all-gather for layer i+1 when kernels from layer i get executed. We have to explicitly issue all-gather i+1 before running forward for layer i</p>
+<p _item_id="83"><strong>Prefetching for 2+ layers</strong>: Implicit prefetching only all-gathers next one layer at a time to keep memory footprint minimum. With explicit prefetching can all-gather multiple layers at a time to possibly for better perf with increased memory. See <code class="docutils literal notranslate"><span class="pre">layers_to_prefetch</span></code> in the code</p>
+<p _item_id="84"><strong>Issuing 1st all-gather earlier</strong>: Implicit prefetching happens at the time of calling <code class="docutils literal notranslate"><span class="pre">model(x)</span></code>. The 1st all-gather gets exposed. We can call <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule.unshard">model.unshard()</a> explicitly earlier to issue 1st all-gather earlier</p>
+<p _item_id="85"><strong>command</strong>: <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--nproc_per_node</span> <span class="pre">2</span> <span class="pre">train.py</span> <span class="pre">--explicit-prefetching</span></code></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell3" tabindex="-1" _item_id="86"><span></span><span class="n">num_to_forward_prefetch</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">layer</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">i</span> <span class="o">&gt;=</span> <span class="nb">len</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">)</span> <span class="o">-</span> <span class="n">num_to_forward_prefetch</span><span class="p">:</span>
+        <span class="k">break</span>
+    <span class="n">layers_to_prefetch</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">j</span><span class="p">]</span> <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_to_forward_prefetch</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="p">]</span>
+    <span class="n">layer</span><span class="o">.</span><span class="n">set_modules_to_forward_prefetch</span><span class="p">(</span><span class="n">layers_to_prefetch</span><span class="p">)</span>
+
+<span class="n">num_to_backward_prefetch</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">layer</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">num_to_backward_prefetch</span><span class="p">:</span>
+        <span class="k">continue</span>
+    <span class="n">layers_to_prefetch</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">[</span><span class="n">i</span> <span class="o">-</span> <span class="n">j</span><span class="p">]</span> <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_to_backward_prefetch</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="p">]</span>
+    <span class="n">layer</span><span class="o">.</span><span class="n">set_modules_to_backward_prefetch</span><span class="p">(</span><span class="n">layers_to_prefetch</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">epochs</span><span class="p">):</span>
+    <span class="c1"># trigger 1st all-gather earlier</span>
+    <span class="c1"># this overlaps all-gather with any computation before model(x)</span>
+    <span class="n">model</span><span class="o">.</span><span class="n">unshard</span><span class="p">()</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">vocab_size</span><span class="p">,</span> <span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">seq_len</span><span class="p">),</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+    <span class="n">loss</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+    <span class="n">loss</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+    <span class="n">optim</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+    <span class="n">optim</span><span class="o">.</span><span class="n">zero_grad</span><span class="p">()</span>
+</pre></div>
+</div>
+</section><section id="enabling-mixed-precision"><h3 _item_id="87">Enabling Mixed Precision<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#enabling-mixed-precision" title="Link to this heading">#</a></h3>
+<p _item_id="88">FSDP2 offers a flexible <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.MixedPrecisionPolicy">mixed precision policy</a> to speed up training. One typical use case is</p>
+<ul class="simple"><li><p _item_id="89">Casting float32 parameters to bfloat16 for forward/backward computation, see <code class="docutils literal notranslate"><span class="pre">param_dtype=torch.bfloat16</span></code></p></li>
+<li><p _item_id="90">Upcasting gradients to float32 for reduce-scatter to preserve accuracy, see <code class="docutils literal notranslate"><span class="pre">reduce_dtype=torch.float32</span></code></p></li>
+</ul><p _item_id="91">Comparing with <a class="reference external" href="https://docs.pytorch.org/docs/stable/amp.html">torch.amp</a>, FSDP2 mixed precision has following advantages</p>
+<ul class="simple"><li><p _item_id="92"><strong>Performant and flexible parameter casting</strong>: All the parameters inside a <code class="docutils literal notranslate"><span class="pre">FSDPModule</span></code> are cast together at the module boundary (before and after before/backward). We can set different mixed precision policies for each layer. For example, the first few layers can be in float32 while remaining layers can be in bfloat16.</p></li>
+<li><p _item_id="93"><strong>float32 gradient reduction (reduce-scatter)</strong>: Gradients might vary a lot from rank to rank. Reducing gradients in float32 can be critical for numerics.</p></li>
+</ul><p _item_id="94"><strong>command</strong>: <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--nproc_per_node</span> <span class="pre">2</span> <span class="pre">train.py</span> <span class="pre">--mixed-precision</span></code></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell4" tabindex="-1" _item_id="95"><span></span><span class="n">model</span> <span class="o">=</span> <span class="n">Transformer</span><span class="p">(</span><span class="n">model_args</span><span class="p">)</span>
+<span class="n">fsdp_kwargs</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"mp_policy"</span><span class="p">:</span> <span class="n">MixedPrecisionPolicy</span><span class="p">(</span>
+        <span class="n">param_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">,</span>
+        <span class="n">reduce_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+    <span class="p">)</span>
+<span class="p">}</span>
+<span class="k">for</span> <span class="n">layer</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">layers</span><span class="p">:</span>
+    <span class="n">fully_shard</span><span class="p">(</span><span class="n">layer</span><span class="p">,</span> <span class="o">**</span><span class="n">fsdp_kwargs</span><span class="p">)</span>
+<span class="n">fully_shard</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="o">**</span><span class="n">fsdp_kwargs</span><span class="p">)</span>
+
+<span class="c1"># sharded parameters are float32</span>
+<span class="k">for</span> <span class="n">param</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">():</span>
+    <span class="k">assert</span> <span class="n">param</span><span class="o">.</span><span class="n">dtype</span> <span class="o">==</span> <span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+
+<span class="c1"># unsharded parameters are bfloat16</span>
+<span class="n">model</span><span class="o">.</span><span class="n">unshard</span><span class="p">()</span>
+<span class="k">for</span> <span class="n">param</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(</span><span class="n">recurse</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+    <span class="k">assert</span> <span class="n">param</span><span class="o">.</span><span class="n">dtype</span> <span class="o">==</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span>
+<span class="n">model</span><span class="o">.</span><span class="n">reshard</span><span class="p">()</span>
+
+<span class="c1"># optimizer states are in float32</span>
+<span class="n">optim</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">optim</span><span class="o">.</span><span class="n">Adam</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span> <span class="n">lr</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">)</span>
+
+<span class="c1"># training loop</span>
+<span class="c1"># ...</span>
+</pre></div>
+</div>
+</section><section id="gradient-clipping-and-optimizer-with-dtensor"><h3 _item_id="96">Gradient Clipping and Optimizer with DTensor<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#gradient-clipping-and-optimizer-with-dtensor" title="Link to this heading">#</a></h3>
+<p _item_id="97"><strong>command</strong>: <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--nproc_per_node</span> <span class="pre">2</span> <span class="pre">train.py</span></code></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell5" tabindex="-1" _item_id="98"><span></span><span class="c1"># optim is constructed base on DTensor model parameters</span>
+<span class="n">optim</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">optim</span><span class="o">.</span><span class="n">Adam</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span> <span class="n">lr</span><span class="o">=</span><span class="mf">1e-2</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">epochs</span><span class="p">):</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">vocab_size</span><span class="p">,</span> <span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">seq_len</span><span class="p">),</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+    <span class="n">loss</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+    <span class="n">loss</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+    <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">clip_grad_norm_</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span> <span class="n">max_norm</span><span class="o">=</span><span class="n">max_norm</span><span class="p">)</span>
+    <span class="n">optim</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
+    <span class="n">optim</span><span class="o">.</span><span class="n">zero_grad</span><span class="p">()</span>
+</pre></div>
+</div>
+<p _item_id="99">Optimizer is initialized after applying <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> on the model, and holds reference to DTensor <code class="docutils literal notranslate"><span class="pre">model.parameters()</span></code>. For gradient clipping, <code class="docutils literal notranslate"><span class="pre">torch.nn.utils.clip_grad_norm_</span></code> works for DTensor parameters. Tensor ops will be dispatched correctly inside DTensor to communicate partial tensors across ranks to preserve the single device semantic.</p>
+</section><section id="state-dicts-with-dtensor-apis"><h3 _item_id="100">State Dicts with DTensor APIs<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#state-dicts-with-dtensor-apis" title="Link to this heading">#</a></h3>
+<p _item_id="101">We showcase how to convert a full state dict into a DTensor state dict for loading, and how to convert it back to full state dict for saving.</p>
+<p _item_id="102"><strong>command</strong>: <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--nproc_per_node</span> <span class="pre">2</span> <span class="pre">train.py</span></code></p>
+<ul class="simple"><li><p _item_id="103">For the 1st time, it creates checkpoints for the model and optimizer</p></li>
+<li><p _item_id="104">For the 2nd time, it loads from the previous checkpoint to resume training</p></li>
+</ul><p _item_id="105"><strong>Loading state dicts</strong>: We initialize the model under meta device and call <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> to convert <code class="docutils literal notranslate"><span class="pre">model.parameters()</span></code> from plain <code class="docutils literal notranslate"><span class="pre">torch.Tensor</span></code> to DTensor. After reading the full state dict from torch.load, we can call <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.tensor.html#torch.distributed.tensor.distribute_tensor">distribute_tensor</a> to convert plain <code class="docutils literal notranslate"><span class="pre">torch.Tensor</span></code> into DTensor, using the same placements and device mesh from <code class="docutils literal notranslate"><span class="pre">model.state_dict()</span></code>. Finally we can call <a class="reference external" href="https://docs.pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.load_state_dict">model.load_state_dict</a> to load DTensor state dicts into the model.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell6" tabindex="-1" _item_id="106"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.tensor</span><span class="w"> </span><span class="kn">import</span> <span class="n">distribute_tensor</span>
+
+<span class="c1"># mmap=True reduces CPU memory usage</span>
+<span class="n">full_sd</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">load</span><span class="p">(</span>
+    <span class="s2">"checkpoints/model_state_dict.pt"</span><span class="p">,</span>
+    <span class="n">mmap</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">weights_only</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">map_location</span><span class="o">=</span><span class="s1">'cpu'</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">meta_sharded_sd</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">state_dict</span><span class="p">()</span>
+<span class="n">sharded_sd</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="k">for</span> <span class="n">param_name</span><span class="p">,</span> <span class="n">full_tensor</span> <span class="ow">in</span> <span class="n">full_sd</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+    <span class="n">sharded_meta_param</span> <span class="o">=</span> <span class="n">meta_sharded_sd</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">param_name</span><span class="p">)</span>
+    <span class="n">sharded_tensor</span> <span class="o">=</span> <span class="n">distribute_tensor</span><span class="p">(</span>
+        <span class="n">full_tensor</span><span class="p">,</span>
+        <span class="n">sharded_meta_param</span><span class="o">.</span><span class="n">device_mesh</span><span class="p">,</span>
+        <span class="n">sharded_meta_param</span><span class="o">.</span><span class="n">placements</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">sharded_sd</span><span class="p">[</span><span class="n">param_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Parameter</span><span class="p">(</span><span class="n">sharded_tensor</span><span class="p">)</span>
+<span class="c1"># `assign=True` since we cannot call `copy_` on meta tensor</span>
+<span class="n">model</span><span class="o">.</span><span class="n">load_state_dict</span><span class="p">(</span><span class="n">sharded_sd</span><span class="p">,</span> <span class="n">assign</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="107"><strong>Saving state dicts</strong>: <code class="docutils literal notranslate"><span class="pre">model.state_dict()</span></code> returns a DTensor state dict. We can convert a DTensor into a plain <code class="docutils literal notranslate"><span class="pre">torch.Tensor</span></code> by calling <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.tensor.html#torch.distributed.tensor.DTensor.full_tensor">full_tensor()</a>. Internally it issues an all-gather across ranks to get unsharded parameters in plain torch.Tensor. For rank 0, <code class="docutils literal notranslate"><span class="pre">full_param.cpu()</span></code> offloads the tensor to cpu one by one to avoid peaking GPU memory with unsharded parameters.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell7" tabindex="-1" _item_id="108"><span></span><span class="n">sharded_sd</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">state_dict</span><span class="p">()</span>
+<span class="n">cpu_state_dict</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="k">for</span> <span class="n">param_name</span><span class="p">,</span> <span class="n">sharded_param</span> <span class="ow">in</span> <span class="n">sharded_sd</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+    <span class="n">full_param</span> <span class="o">=</span> <span class="n">sharded_param</span><span class="o">.</span><span class="n">full_tensor</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">torch</span><span class="o">.</span><span class="n">distributed</span><span class="o">.</span><span class="n">get_rank</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">cpu_state_dict</span><span class="p">[</span><span class="n">param_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">full_param</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">del</span> <span class="n">full_param</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">cpu_state_dict</span><span class="p">,</span> <span class="s2">"checkpoints/model_state_dict.pt"</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="109">Optimizer state dict works similarly (<a class="reference external" href="https://github.com/pytorch/examples/blob/70922969e70218458d2a945bf86fd8cc967fc6ea/distributed/FSDP2/checkpoint.py#L156">code</a>). Users can customize the above DTensor scripts to work with 3rd party checkpoints.</p>
+<p _item_id="110">If there is no need for customization, we can use <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html">DCP APIs</a> directly to support both single-node and multi-node training.</p>
+</section><section id="state-dict-with-dcp-apis"><h3 _item_id="111">State Dict with DCP APIs<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#state-dict-with-dcp-apis" title="Link to this heading">#</a></h3>
+<p _item_id="112"><strong>command</strong>: <code class="docutils literal notranslate"><span class="pre">torchrun</span> <span class="pre">--nproc_per_node</span> <span class="pre">2</span> <span class="pre">train.py</span> <span class="pre">--dcp-api</span></code></p>
+<ul class="simple"><li><p _item_id="113">For the 1st time, it creates checkpoints for the model and optimizer</p></li>
+<li><p _item_id="114">For the 2nd time, it loads from the previous checkpoint to resume training</p></li>
+</ul><p _item_id="115"><strong>Loading state dicts</strong>: We can load a full state dict into a FSDP2 model with <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.state_dict.set_model_state_dict">set_model_state_dict</a>. With <code class="docutils literal notranslate"><span class="pre">broadcast_from_rank0=True</span></code>, we can load the full state dict only on rank 0 to avoid peaking CPU memory. DCP will shard tensors and broadcast them to other ranks.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell8" tabindex="-1" _item_id="116"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.checkpoint.state_dict</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_model_state_dict</span>
+<span class="n">set_model_state_dict</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+    <span class="n">model_state_dict</span><span class="o">=</span><span class="n">full_sd</span><span class="p">,</span>
+    <span class="n">options</span><span class="o">=</span><span class="n">StateDictOptions</span><span class="p">(</span>
+        <span class="n">full_state_dict</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="n">broadcast_from_rank0</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="p">),</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="117"><strong>Saving state dicts</strong>: <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.state_dict.get_model_state_dict">get_model_state_dict</a> with <code class="docutils literal notranslate"><span class="pre">full_state_dict=True</span></code> and <code class="docutils literal notranslate"><span class="pre">cpu_offload=True</span></code> all-gathers tensors and offload them to CPU. It works similarly to DTensor APIs.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell9" tabindex="-1" _item_id="118"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.checkpoint.state_dict</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_model_state_dict</span>
+<span class="n">model_state_dict</span> <span class="o">=</span> <span class="n">get_model_state_dict</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+    <span class="n">options</span><span class="o">=</span><span class="n">StateDictOptions</span><span class="p">(</span>
+        <span class="n">full_state_dict</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="n">cpu_offload</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span>
+<span class="p">)</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">model_state_dict</span><span class="p">,</span> <span class="s2">"model_state_dict.pt"</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="119">Refer to <a class="reference external" href="https://github.com/pytorch/examples/blob/main/distributed/FSDP2/checkpoint.py">pytorch/examples</a> for loading and saving optimizer state dicts with <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.state_dict.set_optimizer_state_dict">set_optimizer_state_dict</a> and <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.state_dict.get_optimizer_state_dict">get_optimizer_state_dict</a>.</p>
+</section></section><section id="fsdp1-to-fsdp2-migration-guide"><h2 _item_id="120">FSDP1-to-FSDP2 migration guide<a class="headerlink" href="https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html#fsdp1-to-fsdp2-migration-guide" title="Link to this heading">#</a></h2>
+<p _item_id="121">Let’s look at an example of an <a class="reference external" href="https://docs.pytorch.org/docs/stable/fsdp.html">FSDP</a> usage and an equivalent <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html">fully_shard</a> usage.  We’ll highlight the key differences and suggest steps for migration.</p>
+<p _item_id="122">Original FSDP() usage</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell10" tabindex="-1" _item_id="123"><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">torch.distributed.fsdp</span><span class="w"> </span><span class="kn">import</span> <span class="n">FullyShardedDataParallel</span> <span class="k">as</span> <span class="n">FSDP</span>
+<span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">(</span><span class="s2">"meta"</span><span class="p">):</span>
+    <span class="n">model</span> <span class="o">=</span> <span class="n">Transformer</span><span class="p">()</span>
+<span class="n">policy</span> <span class="o">=</span> <span class="n">ModuleWrapPolicy</span><span class="p">({</span><span class="n">TransformerBlock</span><span class="p">})</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">FSDP</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">auto_wrap_policy</span><span class="o">=</span><span class="n">policy</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">param_init_fn</span><span class="p">(</span><span class="n">module</span><span class="p">:</span> <span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">FSDP</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">auto_wrap_policy</span><span class="o">=</span><span class="n">policy</span><span class="p">,</span> <span class="n">param_init_fn</span><span class="o">=</span><span class="n">param_init_fn</span><span class="p">)</span>
+</pre></div>
+</div>
+<p _item_id="124">New fully_shard() usage</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre id="codecell11" tabindex="-1" _item_id="125"><span></span><span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">(</span><span class="s2">"meta"</span><span class="p">):</span>
+    <span class="n">model</span> <span class="o">=</span> <span class="n">Transformer</span><span class="p">()</span>
+<span class="k">for</span> <span class="n">module</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">modules</span><span class="p">():</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">module</span><span class="p">,</span> <span class="n">TransformerBlock</span><span class="p">):</span>
+        <span class="n">fully_shard</span><span class="p">(</span><span class="n">module</span><span class="p">)</span>
+<span class="n">fully_shard</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">tensor</span> <span class="ow">in</span> <span class="n">itertools</span><span class="o">.</span><span class="n">chain</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span> <span class="n">model</span><span class="o">.</span><span class="n">buffers</span><span class="p">()):</span>
+    <span class="k">assert</span> <span class="n">tensor</span><span class="o">.</span><span class="n">device</span> <span class="o">==</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">(</span><span class="s2">"meta"</span><span class="p">)</span>
+
+
+<span class="c1"># Initialize the model after sharding</span>
+<span class="n">model</span><span class="o">.</span><span class="n">to_empty</span><span class="p">(</span><span class="n">device</span><span class="o">=</span><span class="s2">"cuda"</span><span class="p">)</span>
+<span class="n">model</span><span class="o">.</span><span class="n">reset_parameters</span><span class="p">()</span>
+</pre></div>
+</div>
+<p _item_id="126">Migration Steps</p>
+<ul class="simple"><li><p _item_id="127">Replace the imports</p></li>
+<li><p _item_id="128">Implement your ‘policy’ directly (apply <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> to the desired sublayers)</p></li>
+<li><p _item_id="129">Wrap your root model with <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> instead of <code class="docutils literal notranslate"><span class="pre">FSDP</span></code></p></li>
+<li><p _item_id="130">Get rid of <code class="docutils literal notranslate"><span class="pre">param_init_fn</span></code> and manually call <code class="docutils literal notranslate"><span class="pre">model.reset_parameters()</span></code></p></li>
+<li><p _item_id="131">Replace other FSDP1 kwargs (see below)</p></li>
+</ul><p _item_id="132">sharding_strategy</p>
+<ul class="simple"><li><p _item_id="133">FULL_SHARD: <code class="docutils literal notranslate"><span class="pre">reshard_after_forward=True</span></code></p></li>
+<li><p _item_id="134">SHARD_GRAD_OP: <code class="docutils literal notranslate"><span class="pre">reshard_after_forward=False</span></code></p></li>
+<li><p _item_id="135">HYBRID_SHARD: <code class="docutils literal notranslate"><span class="pre">reshard_after_forward=True</span></code> with a 2D device mesh</p></li>
+<li><p _item_id="136">_HYBRID_SHARD_ZERO2: <code class="docutils literal notranslate"><span class="pre">reshard_after_forward=False</span></code> with a 2D device mesh</p></li>
+</ul><p _item_id="137">cpu_offload</p>
+<ul class="simple"><li><p _item_id="138">CPUOffload.offload_params=False: <code class="docutils literal notranslate"><span class="pre">offload_policy=None</span></code></p></li>
+<li><p _item_id="139">CPUOffload.offload_params = True: <code class="docutils literal notranslate"><span class="pre">offload_policy=CPUOffloadPolicy()</span></code></p></li>
+</ul><p _item_id="140">backward_prefetch</p>
+<ul class="simple"><li><p _item_id="141">BACKWARD_PRE: always used</p></li>
+<li><p _item_id="142">BACKWARD_POST: not supported</p></li>
+</ul><p _item_id="143">mixed_precision</p>
+<ul class="simple"><li><p _item_id="144"><code class="docutils literal notranslate"><span class="pre">buffer_dtype</span></code> is omitted because fully_shard does not shard buffers</p></li>
+<li><p _item_id="145">fully_shard’s <code class="docutils literal notranslate"><span class="pre">cast_forward_inputs</span></code> maps to both <code class="docutils literal notranslate"><span class="pre">cast_forward_inputs</span></code> and <code class="docutils literal notranslate"><span class="pre">cast_root_forward_inputs</span></code> in FSDP1</p></li>
+<li><p _item_id="146"><code class="docutils literal notranslate"><span class="pre">output_dtype</span></code> is a new config for fully_shard</p></li>
+</ul><p _item_id="147">device_id: Inferred from device_mesh’s device</p>
+<p _item_id="148">sync_module_states=True/False: Moved to DCP. User can broadcast state dicts from rank0 using <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.state_dict.set_model_state_dict">set_model_state_dict</a> with <code class="docutils literal notranslate"><span class="pre">broadcast_from_rank0=True</span></code></p>
+<p _item_id="149">forward_prefetch: Manual control over prefetching is possible with</p>
+<ul class="simple"><li><p _item_id="150">Manually call <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule.unshard">fsdp_module.unshard()</a></p></li>
+<li><p _item_id="151">Use these APIs to control automatic prefetching, <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule.set_modules_to_forward_prefetch">set_modules_to_forward_prefetch</a> and <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule.set_modules_to_backward_prefetch">set_modules_to_backward_prefetch</a></p></li>
+</ul><p _item_id="152">limit_all_gathers: No longer needed, because <code class="docutils literal notranslate"><span class="pre">fully_shard</span></code> removed cpu synchronization</p>
+<p _item_id="153">use_orig_params: Original params are always used (no more flat parameter)</p>
+<p _item_id="154">no_sync(): <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.FSDPModule.set_requires_gradient_sync">set_requires_gradient_sync</a></p>
+<p _item_id="155">ignored_params and ignored_states: <a class="reference external" href="https://docs.pytorch.org/docs/main/distributed.fsdp.fully_shard.html#torch.distributed.fsdp.fully_shard">ignored_params</a></p>
+</section></section></article></div>
+</div>
+</div>
+</main></div>
+</div>
+
+</body></html>
