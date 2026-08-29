@@ -112,10 +112,10 @@ torchrun --nproc_per_node=2 codes/01_torchrun_hello.py
 
 ### 仓库内
 
-- [FSDP Training Backend 原理分析](../rlhf/sys-design/readme-2-en.md)
-- [Support FSDP2 as A Training Backend for slime](../rlhf/slime/fsdp/readme_en.md)
-- [PyTorch Distributed 通信实践](../torch/torch-distributed/readme.md)
-- [Deep Dive into DeepSeek MoE with EP on FSDP](../rlhf/sys-design/readme-4-en.md)
+- [FSDP Training Backend 原理分析](../../rlhf/sys-design/readme-2-en.md)
+- [Support FSDP2 as A Training Backend for slime](../../rlhf/slime/fsdp/readme_en.md)
+- [PyTorch Distributed 通信实践](../torch-distributed/readme.md)
+- [Deep Dive into DeepSeek MoE with EP on FSDP](../../rlhf/sys-design/readme-4-en.md)
 
 ### 外部
 

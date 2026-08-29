@@ -122,5 +122,5 @@ torchrun --nproc_per_node=4 codes/02_multi_dim_mesh.py
 ## 6. 进阶参考
 
 - [TorchTitan](https://github.com/pytorch/torchtitan): PyTorch 官方的 3D 并行训练框架
-- [Support FSDP2 as A Training Backend for slime](../../rlhf/slime/fsdp/readme_en.md): 生产级 FSDP2 用法
-- [Deep Thoughts on RL Systems: FSDP Training Backend](../../rlhf/sys-design/readme-2-en.md): FSDP 原理深度分析
+- [Support FSDP2 as A Training Backend for slime](../../../rlhf/slime/fsdp/readme_en.md): 生产级 FSDP2 用法
+- [Deep Thoughts on RL Systems: FSDP Training Backend](../../../rlhf/sys-design/readme-2-en.md): FSDP 原理深度分析

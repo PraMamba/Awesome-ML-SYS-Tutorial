@@ -71,7 +71,7 @@ Update:
 
 **显存节省的关键**：完整权重只在计算时临时恢复，计算后立即释放。每个 rank 常驻的显存只有 `1/N` 的权重 + `1/N` 的梯度 + `1/N` 的优化器状态。
 
-> 更深入的通信量分析，参见 [Deep Thoughts on RL Systems: FSDP Training Backend](../../rlhf/sys-design/readme-2-en.md)
+> 更深入的通信量分析，参见 [Deep Thoughts on RL Systems: FSDP Training Backend](../../../rlhf/sys-design/readme-2-en.md)
 
 ## 4. 脚本说明
 

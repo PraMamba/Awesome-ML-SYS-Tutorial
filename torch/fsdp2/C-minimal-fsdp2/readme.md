@@ -67,7 +67,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 fully_shard(model)  # 参数引用已变，optimizer 持有的是旧引用
 ```
 
-> 更多关于 FSDP 原理和生产级用法，参见 [FSDP Training Backend](../../rlhf/sys-design/readme-2-en.md) 和 [Support FSDP2 as A Training Backend for slime](../../rlhf/slime/fsdp/readme_en.md)。
+> 更多关于 FSDP 原理和生产级用法，参见 [FSDP Training Backend](../../../rlhf/sys-design/readme-2-en.md) 和 [Support FSDP2 as A Training Backend for slime](../../../rlhf/slime/fsdp/readme_en.md)。
 
 ## 6. 脚本说明
 
