@@ -4,7 +4,7 @@
 
 这篇文章要回答的驱动问题是：
 
-> 给定一组固定的 rank，`ParallelDims` 为什么需要同时构造 `dataloading`、`loss`、`dense` 和 `sparse` 等不同的 `DeviceMesh` 视图？它如何用整数约束保证这些视图都覆盖同一组设备，又如何根据 `spmd_backend` 和已启用的轴把正确的 mesh 交给下游代码？
+> 给定一组固定的 rank，`ParallelDims` 为什么需要同时构造 `dataloading`、`loss`、`dense` 和 `sparse` 等不同的 `DeviceMesh` 视图？它如何用整数约束保证这些 full-world 视图都覆盖同一组设备（`loss` 是其中固定 `pp`/`tp` 后的子 mesh），又如何根据 `spmd_backend` 和已启用的轴把正确的 mesh 交给下游代码？
 
 路线图如下：
 
@@ -19,14 +19,14 @@
 
 先看最朴素的基线：**只有一个一维 world mesh，所有下游代码都直接从这个 mesh 上取 process group**。一维 mesh 只能表达"全体 rank 的一个顺序"，当训练配置里有 PP、TP、CP 等多个并行度时，数据采样器想知道"谁读哪一份数据"，loss 归约想知道"哪些 rank 的 loss 要加在一起"，FSDP 想知道"哪些 rank 沿哪个轴一起分片权重"，MoE 想知道"哪些 rank 一起服务一组专家"，这些问题的答案都是"同一批 rank 的不同分组方式"，而一维 mesh 表达不了这种多维组织。
 
-于是自然走到中间态：**用 unflatten 把一维 world mesh 拆成多维，让每个轴对应一个并行度**。拆出多维之后又会发现，同一段设备排列可以同时按多种方式解释，比如 FSDP 关心 `(dp_replicate, dp_shard, cp, tp)` 的存储视图，而数据加载只关心 `(batch, cp, tp)` 的数据视图，它们各自的轴划分不同，却覆盖完全相同的设备集合，这有点像同一块内存被不同 shape 的 tensor view 复用（这个比方不完全严谨：tensor view 复用内存，mesh 视图复用的是设备与 process group，但"同一份底层资源、多种解释"的结构是一样的）。再往后，不同 backend 对 dense 轴的解释出现分歧，MoE 还需要一个不同于 dense 的 sparse 视图，最终形态就是本文的主角：**一个 world mesh 加上多组视图，再加一组按 backend 与启用状态解析 mesh 的函数**。
+于是自然走到中间态：**用 unflatten 把一维 world mesh 拆成多维，让每个轴对应一个并行度**。拆出多维之后又会发现，同一段设备排列可以同时按多种方式解释，比如 FSDP 关心 `(dp_replicate, dp_shard, cp, tp)` 的存储视图，而数据加载只关心 `(batch, cp, tp)` 的数据视图，它们各自的轴划分不同，却覆盖完全相同的设备集合，这有点像同一块内存被不同 shape 的 tensor view 复用（这个比方不完全严谨：tensor view 复用内存，mesh 视图复用同一批设备与 rank，但本 commit 的 TorchTitan 源码注释描述的行为是 `DeviceMesh` 会为每个维度重建 process group，并把"共享同一 dim 组的 process group"列为待办，见 [build_mesh 注释（L180-L185）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L180-L185)，所以"复用"目前只发生在设备层；"同一份底层资源、多种解释"的结构仍然成立）。再往后，不同 backend 对 dense 轴的解释出现分歧，MoE 还需要一个不同于 dense 的 sparse 视图，最终形态就是本文的主角：**一个 world mesh 加上多组视图，再加一组按 backend 与启用状态解析 mesh 的函数**。
 
-驱动问题里的三个动词正好对应这个文件的三个职责段：**"用整数约束保证覆盖同一组设备"对应 `_validate()` 与 `_validate_meshes()`，"构造多个视图"对应 `build_mesh()`，"按 backend 和启用轴取对 mesh"对应 `get_optional_mesh()`/`resolve_mesh()` 一组解析函数**。全文用一个固定配置贯穿：`world_size=32, dp_replicate=2, dp_shard=2, cp=2, tp=2, pp=2, ep=4`，所有形状都能手算验证。
+驱动问题里的三个动词正好对应这个文件的三个职责段：**"用整数约束保证 full-world 视图覆盖同一组设备"对应 `_validate()`（度数守恒）与 `_validate_meshes()`（逐轴核对 size），"构造多个视图"对应 `build_mesh()`，"按 backend 和启用轴取对 mesh"对应 `get_optional_mesh()`/`resolve_mesh()` 一组解析函数**。全文用一个固定配置贯穿：`world_size=32, dp_replicate=2, dp_shard=2, cp=2, tp=2, pp=2, ep=4`，所有形状都能手算验证。预告一下最终形状：`dataloading` 视图为 `(2, 4, 2, 2)`、`sparse` 视图为 `(2, 2, 2, 4)`，乘积回到 32；`loss` 是固定 `pp`/`tp` 后的 `(batch, cp)` 子 mesh，大小 8，推导细节留到 ch5。
 
 具体而言，一次从配置到取 mesh 的处理过程如下：
 
 1. `from_config()` 把 `ParallelismConfig` 里的六个并行度与 `spmd_backend` 映射成 `ParallelDims` 的字段；
-2. 构造时 `__post_init__()` 触发 `_validate()`，拒绝非法度数组合，并判定每个轴是否存在；
+2. 构造时 `__post_init__()` 触发 `_validate()`，只校验度数合法性（正数、dense 乘积、EP 整除）；轴是否存在由 `build_mesh()` 与查询路径中的 `_mesh_exist()` 决定；
 3. 首次取 mesh 时 `build_mesh()` 从一维 world mesh unflatten 出 dataloading/loss/dense/sparse 视图，再用 `_validate_meshes()` 逐轴核对形状；
 4. 下游代码通过 `get_optional_mesh()`/`resolve_mesh()` 按 backend 与启用状态取走对应视图，sparse 视图交给 MoE 的 token dispatcher 消费。
 
@@ -34,7 +34,7 @@
 
 ### 概念
 
-上一章用固定配置预告了全文要手算的所有形状，而把度数乘积读成坐标切片正是这些形状可算的前提：**`DeviceMesh` 的轴（axis）是 rank 集合的一个坐标切片方向**。把 `world_size` 个 rank 按行主序排成一个多维网格，每个轴对应一个并行策略的度数，固定某个轴上的坐标、放开其余坐标，得到的 rank 子集就是一个通信组的成员集合。
+上一章用固定配置预告了全文要手算的所有形状，而把度数乘积读成坐标切片正是这些形状可算的前提：**`DeviceMesh` 的轴（axis）是 rank 集合的一个坐标切片方向**。把 `world_size` 个 rank 按行主序排成一个多维网格，每个轴对应一个并行策略的度数；`DeviceMesh.get_group(mesh_dim=i)` 固定其余轴的坐标、沿轴 i 变化，得到的 rank 子集就是该轴的通信组（语义细节见 [DeviceMesh 官方教程](https://pytorch.org/tutorials/recipes/distributed_device_mesh.html)）。
 
 torchtitan 在 `MeshAxisName` 的 [docstring](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L30-L40) 里立了一条命名约定：**用 `axis` 表示 `DeviceMesh` 的轴，用 `dim` 表示 tensor 的维度**，因为 PyTorch 上游 API 里的 `mesh_dim_names`/`mesh_dim` 与 tensor 的 `dim` 经常撞名，torchtitan 内部统一用 `axis` 指 mesh 轴来避免歧义。这个约定看起来只是命名洁癖，但它决定了后面所有代码的措辞：凡是从 `_single_axis_meshes` 里取的东西都是轴，凡是 placement 里 `Shard(dim)` 引用的才是 tensor 维度。
 
@@ -55,11 +55,11 @@ torchtitan 在 `MeshAxisName` 的 [docstring](https://github.com/pytorch/torchti
 | 6 | (1, 2) |
 | 7 | (1, 3) |
 
-行主序下 rank 沿最后一个轴变化最快，所以 rank 6 的坐标是 `(1, 2)`。固定 axis0=1，得到 axis0 的组 `[4, 5, 6, 7]`；固定 axis1=2，得到 axis1 的组 `[2, 6]`。这个例子只用于建立"轴即坐标切片"的直觉，**不把坐标顺序解释成硬件拓扑**，哪个轴对应 NVLink 或哪级网络需要独立的硬件资料或下游实现来证明，源码本身没有这个证据。
+行主序下 rank 沿最后一个轴变化最快，所以 rank 6 的坐标是 `(1, 2)`。按 `DeviceMesh.get_group` 的语义：固定 axis1=2、沿 axis0 变化，得到 axis0 的通信组 `[2, 6]`；固定 axis0=1、沿 axis1 变化，得到 axis1 的通信组 `[4, 5, 6, 7]`。注意 lab 的 `02_mesh_coordinates.py` 里 `axis_group()` 是另一种自定义语义：它返回"与 rank 共享该轴坐标"的 rank 集合（固定该轴、放开其余轴），所以脚本输出 axis 0 组 `[4, 5, 6, 7]`，那是一个坐标 fiber，**不是 DeviceMesh 的通信组**，两套语义不要混用。这个例子只用于建立"轴即坐标切片"的直觉，**不把坐标顺序解释成硬件拓扑**，哪个轴对应 NVLink 或哪级网络需要独立的硬件资料或下游实现来证明，源码本身没有这个证据。
 
 ### 代码分析
 
-轴名枚举定义在 [MeshAxisName（L29-L50）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L29-L50)，九个轴名分别是 `DP/DP_REPLICATE/DP_SHARD/FSDP/TP/CP/PP/EP/EFSDP`，其中 `DP` 是逻辑轴，其余是具体轴。逻辑轴的展开函数紧接着定义在 [unfold_dp_axis / unfold_dp_axes（L53-L65）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L53-L65)：
+下文 Python 源码块均为固定 commit 下源码的节选：可能移除外层缩进、无关注释/类型注解，或对行内换行做了规范化，完整原文以行号链接为准。轴名枚举定义在 [MeshAxisName（L29-L50）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L29-L50)，九个轴名分别是 `DP/DP_REPLICATE/DP_SHARD/FSDP/TP/CP/PP/EP/EFSDP`，其中 `DP` 是逻辑轴，其余是具体轴。逻辑轴的展开函数紧接着定义在 [unfold_dp_axis / unfold_dp_axes（L53-L65）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L53-L65)：
 
 ```python
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
@@ -88,7 +88,7 @@ def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
 
 ### 概念
 
-`ParallelDims` 的六个基础字段各有职责：**`dp_replicate` 是复制维度**，每张卡持有完整副本，反向传播结束时做一次梯度 all-reduce；**`dp_shard` 是 FSDP 分片维度**，权重按 rank 分片，前向 all-gather、反向 reduce-scatter；**`cp` 是上下文并行**，沿 sequence 维度切分；**`tp` 是张量并行**，沿 hidden 维度切分；**`pp` 是流水线并行**，沿层维度切分；**`ep` 是专家并行**，把不同专家分布到不同 rank 上。
+上一章把逻辑 `dp` 展开成 `dp_replicate` 与 `dp_shard` 两个具体轴，本章把六个基础并行度摆齐，并推导出四个派生量。`ParallelDims` 的六个基础字段各有职责：**`dp_replicate` 是复制维度**，每张卡持有完整副本，反向传播结束时做一次梯度 all-reduce；**`dp_shard` 是 FSDP 分片维度**，权重按 rank 分片，前向 all-gather、反向 reduce-scatter；**`cp` 是上下文并行**，沿 sequence 维度切分；**`tp` 是张量并行**，沿 hidden 维度切分；**`pp` 是流水线并行**，沿层维度切分；**`ep` 是专家并行**，把不同专家分布到不同 rank 上。
 
 从这六个度数可以推导出四个派生量，**派生量是数据组织视角的缩写，不是新增的物理维度**，它们回答的都是"哪些轴一起构成某个通信域"：
 
@@ -152,7 +152,7 @@ efsdp = fsdp * self.tp // self.ep
 
 上一章 `efsdp` 敢用整除除法的依据，正是本章要展开的构造器检查；在进入 `_validate()` 之前先分清两类约束：**构造期 invariant 是 `ParallelDims` 自己保证的**，只覆盖"这组度数能否展开成覆盖 `world_size` 的 mesh"；**调用方约束是模型层面的**，比如序列长度、hidden size、注意力头数能否被并行度整除，构造器完全不知道这些超参数，也不负责检查。这两类约束的分界线就是本文反复强调的证据边界之一：`ParallelDims` 能构造，不等于整个模型配置可运行。
 
-还有一个容易忽略的概念：**singleton 轴（degree=1）不必然有真实的 collective group**。`build_mesh()` 对不存在的轴用 fake backend 创建 mesh，fake backend 不建真实 process group、不能跑集合通信，只占一个坐标位置。但有三个例外轴即使在 size=1 时也保留真实 backend：`fsdp` 恒真（`fully_shard()` 需要在 degree=1 时也能安装 `MixedPrecisionPolicy`），`spmd_types` 下的 `dp_shard` 恒真（FSDP 需要沿它区分 DP 子 mesh），`ep > 1` 时的 `efsdp` 恒真（MoE 层需要 FSDP 包装做混合精度训练）。
+还有一个容易忽略的概念：**singleton 轴（degree=1）不必然有真实的 collective group**。`build_mesh()` 对不存在的轴用 fake backend 创建 mesh，fake backend 不建真实 process group、不能跑集合通信，只占一个坐标位置。但有三个例外轴即使在 size=1 时也保留真实 backend：`fsdp` 恒真（`fully_shard()` 需要在 degree=1 时也能安装 `MixedPrecisionPolicy`），`spmd_types` 下的 `dp_shard` 恒真（FSDP 需要沿它区分 DP 子 mesh），`ep > 1` 时的 `efsdp` 恒真（MoE 层需要 FSDP 包装做混合精度训练）。注意这里的 fake 是 per-axis 的 `backend_override`，与 `CommConfig.mode="fake_backend"` 的全局 dry-run 模式是两层不同的机制（后者用于无 GPU 的配置验证，本文不展开）。
 
 ### 模型/场景
 
@@ -224,13 +224,13 @@ def _mesh_exist(self, name: str, degree: int) -> bool:
     return degree > 1
 ```
 
-这段代码同时是"singleton 轴"与"fake backend"两个概念的交汇点：`_mesh_exist` 返回 False 的轴在 unflatten 时被标记为 fake backend（下一章看 `unflatten_mesh`），而 `_mesh_exist` 返回 True 的轴即使 size=1 也保留真实 backend。注意它只回答"存不存在"，不回答"启没启用"，"启用"的判定是 `degree > 1` 与 `_mesh_exist` 的组合，这个区分到"取对 mesh"一章会再次出现。
+这段代码同时是"singleton 轴"与"fake backend"两个概念的交汇点：`_mesh_exist` 返回 False 的轴在 unflatten 时被标记为 fake backend（下一章看 `unflatten_mesh`），而 `_mesh_exist` 返回 True 的轴即使 size=1 也保留真实 backend。注意它只回答"存不存在"，不回答"启没启用"；`*_enabled` property 只检验 `degree > 1`，而 `get_optional_mesh()` 的返回还叠加"轴名是否在当前 backend 注册"与 fake/size 过滤（见 ch7），这是三个不同层的判定。
 
 ## build_mesh：一个 world mesh 的多种视图
 
 ### 概念
 
-有了合法的度数组合，下一步是把一维 world mesh 展开成多个视图。**unflatten 是把一维 world mesh 按度数拆成多维，flatten 是把多维子 mesh 压成一维**，两个操作都发生在同一个 `DeviceMesh` 上，不新建任何设备。**多个视图是同一批 rank 的不同组织视角**，所以每个覆盖全世界的视图，其各轴度数的乘积都必须等于 `world_size`，这就是 `_validate_meshes()` 存在的理由：**用整数守恒证明"视图没有凭空增加设备"**。
+有了合法的度数组合，下一步是把一维 world mesh 展开成多个视图。**unflatten 是把一维 world mesh 按度数拆成多维，flatten 是把多维子 mesh 压成一维**，两个操作都从同一 world rank 集合派生：`_unflatten` 作用于 world mesh，`_flatten` 作用于 dataloading 子 mesh，不新增任何 rank 或设备。**多个视图是同一批 rank 的不同组织视角**，所以每个覆盖全世界的视图，其各轴度数的乘积都必须等于 `world_size`。这个守恒是 `_validate()` 的 degree 乘积约束与 `_unflatten()` 形状推导的数学结果；`_validate_meshes()` 的职责是**逐轴断言构造出的 mesh size 与期望一致**，它并不遍历视图、不计算乘积。
 
 四个视图各有用途：**`dataloading` 视图给数据采样器**，它需要知道全局 batch 是多少、每个 rank 读哪一段数据，所以把 `dp_replicate` 与 `dp_shard` 合并成 `batch` 轴；**`loss` 视图给 loss all-reduce**，它是 `dataloading` 的 `(batch, cp)` 子 mesh 再 flatten 成一维的结果；**`dense` 视图给 FSDP/TP**，是参数存储与计算的完整视角；**`sparse` 视图给 MoE 专家区域**。这四类视图对应驱动问题里的第一问：不是 torchtitan 闲得慌要维护四份 mesh，而是四类下游代码对"设备如何分组"的诉求不同，**一维 world mesh 的演进路径是：直接用一维 → unflatten 出多维视图并用乘积校验 → 按 backend 分化 dense 解释并补 sparse 视图与解析函数**（这是帮助理解的教学顺序，不是源码提交历史）。
 
@@ -247,7 +247,7 @@ def _mesh_exist(self, name: str, degree: int) -> bool:
 | `partial_dtensor` dense | `(pp, dpr, fsdp, tp) = (2, 2, 4, 2)` | 将 `dps` 与 `cp` 折叠为 `fsdp` |
 | `sparse` | `(pp, dpr, efsdp, ep) = (2, 2, 2, 4)` | expert region 的 mesh 视角 |
 
-最容易看错的一行是 `loss`：它的乘积是 `batch × cp = 8`，不是 32，因为它只是 `dataloading` 的一个二维子 mesh 再压平，**它不覆盖全世界，只覆盖"和自己共享 batch 与 cp 坐标"的那批 rank**（这个子 mesh 的其余坐标 `pp`、`tp` 与当前 rank 相同）。全 world 视图的乘积才是 32。视图之间的关系用一张 mermaid 表达（只画 world mesh 到各视图的投影，不画任何未经源码证实的网络拓扑）：
+最容易看错的一行是 `loss`：它的乘积是 `batch × cp = 8`，不是 32，因为它只是 `dataloading` 的一个二维子 mesh 再压平，**它固定 `pp` 与 `tp` 的坐标、让 `batch` 与 `cp` 变化**，即同一个 pp 层、同一个 tp 组内，batch×cp 全部 rank 的 loss 一起归约，所以该子 mesh 的大小是 `4 × 2 = 8`，不覆盖全世界。全 world 视图的乘积才是 32。视图之间的关系用一张 mermaid 表达（只画 world mesh 到各视图的投影，不画任何未经源码证实的网络拓扑）：
 
 ```mermaid
 flowchart TD
@@ -268,7 +268,11 @@ flowchart TD
 先看内部 helper 与 dataloading/loss 的构造（[L188-L228](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L188-L228)）：
 
 ```python
-def unflatten_mesh(world_mesh, dim_names, dim_degrees):
+def unflatten_mesh(
+    world_mesh: DeviceMesh,
+    dim_names: tuple[str, ...],
+    dim_degrees: tuple[int, ...],
+):
     """Unflatten the world mesh to create the required mesh dimensions.
 
     Uses fake backend for dimensions with degree 1 or for 'batch' dimension
@@ -309,7 +313,7 @@ loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
 
 </details>
 
-接着是 `_global_meshes` 与 `_single_axis_meshes` 两个字典的填充（[L268-L295](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L268-L295)）：
+接着是 `_global_meshes` 与 `_single_axis_meshes` 两个字典的填充（[L268-L295](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L268-L295)，核心节选，完整实现见链接）：
 
 ```python
 self._global_meshes = {
@@ -342,9 +346,9 @@ else:
     self._single_axis_meshes["fsdp"] = full_dense_mesh_for_fsdp["fsdp"]
 ```
 
-1. `_global_meshes` 是"多轴查询"的候选池，`_single_axis_meshes` 是"单轴查询"的直接索引，两者都是"轴名 → 已构造好的 `DeviceMesh` 对象"；
+1. `_single_axis_meshes` 是"轴名 → 单轴 `DeviceMesh`"的直接索引；`_global_meshes` 以视图名（`dataloading`/`loss`/`dense`/`sparse` 等）为 key 保存多轴视图，是多轴查询的候选池，两者存的都是已构造好的 `DeviceMesh` 对象；
 2. 公共的单轴有 8 个：`pp/batch/loss/dp_replicate/cp/tp/ep/efsdp`，其中 `pp/batch/cp/tp` 取自 `dataloading_mesh`，`ep/efsdp` 取自 `full_sparse_mesh`，`dp_replicate` 取自 dense 视图；
-3. backend 特有的单轴在分支里补：`spmd_types` 加 `dp` 与 `dp_shard`（都带真实语义），`partial_dtensor` 加 `fsdp`，这正是"`fsdp` 不是所有 backend 的固定轴名"的第一个源码证据。
+3. backend 特有的单轴在分支里补：`spmd_types` 加 `dp` 与 `dp_shard`（`dp_shard` 恒真，`dp` 在 size=1 时仍会走 fake），`partial_dtensor` 加 `fsdp`（恒真），这正是"`fsdp` 不是所有 backend 的固定轴名"的第一个源码证据；
 
 视图构造完之后的校验是 [\_validate_meshes（L306-L329）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L306-L329)，它维护一张 `expected_sizes` 表并逐轴断言实际 size 相等：
 
@@ -366,13 +370,13 @@ else:
     expected_sizes["fsdp"] = self.dp_shard * self.cp
 ```
 
-这张表就是"整数守恒"的落地：`loss` 的期望值是 `dpr*dps*cp=8`，而所有全 world 视图的轴期望值相乘都是 32。**`_validate()` 保证度数层面守恒，`_validate_meshes()` 保证构造出的 mesh 层面守恒**，两道防线分别对应驱动问题里的"整数约束"与"视图覆盖"。
+这张表逐项断言每个已登记轴的 size：`loss` 的期望值是 `dpr*dps*cp=8`，其余轴的期望值相乘回到 32（后者是度数约束与 unflatten 形状的数学结果，不是该函数计算的）。**`_validate()` 在度数层面保证 dense 乘积守恒，`_validate_meshes()` 在构造结果层面逐轴核对 size**，两道校验分别对应驱动问题里的"整数约束"与"视图与度数一致"。
 
 ## 两个 spmd_backend 的 dense 解释
 
 ### 概念
 
-同一个度数组合为什么在两个 backend 下会得到不同的 dense 视图？根源在于两个 backend 对"dense 计算域"的抽象粒度不同。**`spmd_types` 是新的 SPMD 类型系统后端**：存储层交给 `fully_shard()` 的 mesh 必须保留 `dp_replicate` 与 `dp_shard` 两个独立轴（分片轴、复制轴语义不同），而前向/反向的 typechecking 只需要逻辑轴 `(dp, cp, tp)`，因为 SPMD 类型系统眼里数据并行只有一个逻辑 `dp`；**`partial_dtensor` 是经典 DTensor 后端**：dense 视图直接把 `dp_shard` 与 `cp` 折叠成 `fsdp` 一个轴，因为 DTensor 的存储与计算共用同一套 mesh 语义。
+上一章的 dense 视图只是形状层面的展开，视图的轴排布还取决于 backend，于是问题变成：同一个度数组合为什么在两个 backend 下会得到不同的 dense 视图？根源在于两个 backend 对"dense 计算域"的抽象粒度不同。**`spmd_types` 是新的 SPMD 类型系统后端**：存储层交给 `fully_shard()` 的 mesh 必须保留 `dp_replicate` 与 `dp_shard` 两个独立轴（分片轴、复制轴语义不同），而前向/反向的 typechecking 只需要逻辑轴 `(dp, cp, tp)`，因为 SPMD 类型系统眼里数据并行只有一个逻辑 `dp`；**`partial_dtensor` 是经典 DTensor 后端**：dense 视图直接把 `dp_shard` 与 `cp` 折叠成 `fsdp` 一个轴（这个"为什么"是我的教学解释，源码注释只说明它 folds `dp_shard` and `cp` into `fsdp`）。
 
 由此得到一个重要结论：**`fsdp` 不是所有 backend 都存在的固定轴名**。`partial_dtensor` 暴露 `fsdp`，`spmd_types` 暴露 `dp` 与 `dp_shard`，下游代码按 backend 取不同的轴名，任何把 `fsdp` 当成"必然存在"的写法都只对 `partial_dtensor` 成立。
 
@@ -385,7 +389,7 @@ else:
 | `spmd_types` | `(pp, dpr, dps, cp, tp)` 及 `(pp, dp, cp, tp)` | `dp`、`dp_shard` | SPMD 类型系统看到逻辑 `dp`；完整 storage 视图仍保留 `dps` |
 | `partial_dtensor` | `(pp, dpr, fsdp, tp)` | `fsdp` | `dps` 与 `cp` 在 dense 视图中先折叠 |
 
-再对照 `get_optional_mesh()` 的 [docstring（L340-L342）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L331-L371)：它列出的合法选项里有 `'fsdp'`，但**在 `spmd_types` 分支下 `_single_axis_meshes` 实际加入的是 `dp` 和 `dp_shard`，请求 `fsdp` 会得到 "Invalid mesh dim" 的 `ValueError`**。docstring 的列表是历史遗留的通用描述，运行时字典才是当前 backend 的真相，文章按运行时行为解释，不把 docstring 的列表当成所有 backend 的保证。
+再对照 `get_optional_mesh()` 的 [docstring（L340-L342）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L331-L371)：它列出的合法选项里有 `'fsdp'`，但**在 `spmd_types` 分支下 `_single_axis_meshes` 实际加入的是 `dp` 和 `dp_shard`，请求 `fsdp` 会得到 "Invalid mesh dim" 的 `ValueError`**。docstring 的列举范围比当前 `spmd_types` 注册表更宽（原因未由本 commit 证明），运行时字典才是当前 backend 的真相，文章按运行时行为解释，不把 docstring 的列表当成所有 backend 的保证。
 
 ### 代码分析
 
@@ -419,7 +423,7 @@ else:
 ```
 
 1. `spmd_types` 分支建了两个 dense 视图：五轴的 storage 视图给 `fully_shard()`（SPMD 类型系统看不到这些轴），四轴的 fwd/bwd 视图给 typechecking，其中 `dp` 轴的度数就是 `batch = dpr*dps`，注释明确说"`dp` folds `dp_replicate * dp_shard` into one logical axis"；
-2. `spmd_dense_mesh_for_fwdbwd` 再切掉 `pp` 轴，得到 `(dp, cp, tp)` 三维 mesh，因为前向/反向类型检查按层进行，不需要 `pp` 坐标；
+2. `spmd_dense_mesh_for_fwdbwd` 再切掉 `pp` 轴，得到 `(dp, cp, tp)` 三维 mesh，前向/反向类型检查按层进行、不需要 `pp` 坐标（这一句是对设计意图的推断，源码只注释它是 fwd/bwd typechecking 用的 mesh）；
 3. `partial_dtensor` 分支只有一个 dense 视图 `(pp, dpr, fsdp, tp)`，`fsdp` 轴度数就是 `dps*cp`，注释明确说"folds `dp_shard` and `cp` into `fsdp`"。
 
 配套的 backend 条件在 `_validate_meshes()`（[L318-L323](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L306-L329)），以及三个取 mesh 的入口 [spmd_dense_mesh / spmd_sparse_mesh / get_dense_tp_mesh（L425-L441）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L425-L441)：
@@ -444,10 +448,10 @@ def get_dense_tp_mesh(self) -> DeviceMesh:
     return self.get_mesh("tp")
 ```
 
-1. 两个 SPMD mesh 入口都先做懒构建（`_single_axis_meshes` 为空就调 `build_mesh()`），这是 `build_mesh()` 是幂等的体现，`_global_meshes` 只在该函数里被赋值一次；
+1. 两个 SPMD mesh 入口都先做懒构建（`_single_axis_meshes` 为空就调 `build_mesh()`），这只是"缓存非空时不重复触发构建"的 guard，**不是 `build_mesh()` 的幂等契约**：显式重复调用 `build_mesh()` 会重设 `_world_mesh` 并重建两个字典；
 2. `spmd_dense_mesh()` 在 `partial_dtensor` 下会 `KeyError`，因为 `spmd_dense_for_fwdbwd` 只在 `spmd_types` 分支写入，所以它只能配合 `spmd_types` 使用；
 3. `spmd_sparse_mesh()` 用 `.get()` 返回 `None`，对应"`ep <= 1` 或非 `spmd_types` 时没有 sparse SPMD 视图"；
-4. `get_dense_tp_mesh()` 是跨 backend 的 TP 轴入口：`spmd_types` 从 fwd/bwd 视图取 `tp`，`partial_dtensor` 走 `get_mesh("tp")`，下游优化器就是拿它取 TP 通信组的（[optimizer.py L477](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/optimizer/optimizer.py#L477) 里 `parallel_dims.get_dense_tp_mesh().get_group()`）。
+4. `get_dense_tp_mesh()` 是跨 backend 的 TP 轴入口：`spmd_types` 从 fwd/bwd 视图取 `tp`，`partial_dtensor` 走 `get_mesh("tp")`，下游优化器就是拿它取 TP 通信组的（[optimizer.py L477](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/components/optimizer/optimizer.py#L477) 里 `parallel_dims.get_dense_tp_mesh().get_group()`）。
 
 至此"构造"侧的代码已经走完，但 `_single_axis_meshes` 与 `_global_meshes` 只是"有 mesh"，下游真正要的是"取对 mesh"，下一章看解析侧的四种语义。
 
@@ -455,9 +459,9 @@ def get_dense_tp_mesh(self) -> DeviceMesh:
 
 ### 概念
 
-解析侧的四个 API 对应四种调用意图，失败语义各不相同：**`get_optional_mesh(dims)` 是可选的**，请求的轴里只要有一个未启用就返回 `None`；**`get_mesh(dims)` 是强制的**，`None` 直接抛 `ValueError`；**`get_activated_mesh(axes)` 是过滤式的**，它先筛掉未启用的轴，剩下的轴组成子 mesh 返回，一个都不剩才返回 `None`；**`resolve_mesh(axes)` 是 backend 感知的**，先按 backend 的 in-band 轴集合过滤，再交给 `get_activated_mesh`；`resolve_shared_mesh(placements)` 则服务于"同一边界内多个 SPMD placement 必须落在同一个 mesh 上"的约束。
+解析侧的四个 API 对应四种调用意图，失败语义各不相同：**`get_optional_mesh(dims)` 是可选的**，请求的轴里只要有一个未启用就返回 `None`（例外是 ch4 讲过的三个恒真轴：`fsdp`、`spmd_types` 下的 `dp_shard`、`ep > 1` 时的 `efsdp`，它们即使 size=1 也返回真实 mesh）；**`get_mesh(dims)` 是强制的**，`None` 直接抛 `ValueError`；**`get_activated_mesh(axes)` 是过滤式的**，它先筛掉未启用的轴，剩下的轴组成子 mesh 返回，一个都不剩才返回 `None`；**`resolve_mesh(axes)` 是 backend 感知的**，先按 backend 的 in-band 轴集合过滤，再交给 `get_activated_mesh`；`resolve_shared_mesh(placements)` 则服务于"同一边界内多个 SPMD placement 必须落在同一个 mesh 上"的约束。
 
-这里还有两个贯穿始终的机制：**fake backend 的轴可以"存在"但不"启用"**，`get_all_one_dimensional_meshes()` 只返回 `ndim == 1`、`size() > 1` 且 `_mesh_exist` 为真的轴，因为 fake backend 的 process group 不能跑 collective；**多轴查询必须复用缓存对象**，`DeviceMesh` 相等性按对象 identity，每次重新切片会破坏"同一组设备同一对象"的不变量，这正是 dataclass 字段区那行注释预告的设计。
+这里还有两个贯穿始终的机制：**fake backend 的轴存在于 `_single_axis_meshes` 字典中，但没有真实 process group，不能跑 collective**，`get_all_one_dimensional_meshes()` 只返回 `ndim == 1`、`size() > 1` 且 `_mesh_exist` 为真的轴；**多轴查询必须复用缓存对象**，`DeviceMesh` 相等性按对象 identity，每次重新切片会破坏"同一组设备同一对象"的不变量，这正是 dataclass 字段区那行注释预告的设计。
 
 ### 模型/场景
 
@@ -473,7 +477,7 @@ def get_dense_tp_mesh(self) -> DeviceMesh:
 
 ### 代码分析
 
-`get_optional_mesh()` 的完整逻辑在 [L331-L397](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L331-L397)，多轴路径是核心：
+`get_optional_mesh()` 的完整逻辑在 [L331-L397](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L331-L397)，以下是多轴路径的核心节选（完整实现见链接）：
 
 ```python
 if not self._single_axis_meshes:
@@ -518,7 +522,7 @@ return submesh
 
 1. 懒构建：mesh 还没建就先调 `build_mesh()`，这也是 `world_mesh` property（[L555-L559](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L555-L559)）的触发路径；
 2. 轴名合法性以 `_single_axis_meshes` 的键为准，所以 `spmd_types` 下请求 `"fsdp"` 在这里就抛 "Invalid mesh dim"，印证了上一章 docstring 与运行时字典的差异；
-3. singleton 过滤调 `_mesh_exist`，`include_singleton_axes=True` 是给 spmd_types 的参数/缓冲区注册用的（下游 [module.py L301-L303](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/protocols/module.py#L301-L303) 就带着这个 flag 调 `assert_type`）；
+3. singleton 过滤调 `_mesh_exist`，`include_singleton_axes=True` 是给 spmd_types 的参数/缓冲区注册用的（下游 [module.py L301-L325](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/protocols/module.py#L301-L325) 就带着这个 flag 调 `assert_type`）；
 4. 单轴直接返回缓存对象，多轴先查 `_multi_axis_meshes`，miss 时在所有 global mesh 里找"轴名集合是请求超集"的第一个候选，切片后按 `tuple(dims)` 缓存。
 
 `get_mesh()`（[L399-L423](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L399-L423)）只是 `get_optional_mesh` 加一层 `None → ValueError`，错误信息还会区分"单轴未启用"与"多轴未全部启用"两种措辞。`get_activated_mesh()`（[L443-L459](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L443-L459)）把"过滤"做在调用 `get_optional_mesh` 之前：
@@ -560,8 +564,8 @@ return self.resolve_mesh(axes)
 ```
 
 1. `resolve_mesh` 的 in-band 集合正是"backend 保留的轴"：`spmd_types` 保留 `dp/cp/tp/ep` 四个逻辑轴，`partial_dtensor` 只保留 `tp/ep`，其余轴被视为 out-of-band 直接丢弃，docstring 说得很直白：我们总是把所有轴都列出来，backend 决定留哪些；
-2. `resolve_shared_mesh` 检查的是**轴集合一致而不是 placement 值一致**，因为"同一 mesh 上不同 placement"（redistribute）恰恰是合法的，`None` 条目被跳过（非 tensor 参数或可选的 in/dst/grad placement）；
-3. `resolve_mesh` 的主要调用方是 `partial_dtensor` 路径的状态分发（[module.py L400/L443](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/protocols/module.py#L396-L404)），`spmd_types` 路径则直接走 `get_activated_mesh(unfold_dp_axes(...))`，两条路径共用同一套解析机制的不同入口。
+2. `resolve_shared_mesh` 要求**非 None 条目的轴 tuple 完全一致（顺序也须一致）**，而 placement 值可以不同，因为"同一 mesh 上不同 placement"（redistribute）恰恰是合法的，`None` 条目被跳过（非 tensor 参数或可选的 in/dst/grad placement）；
+3. 不同 consumer 使用 `ParallelDims` 的不同入口：`spmd_types` 的模块参数/缓冲区分发走 `_spmd_distribute_state`，即 `get_optional_mesh(..., include_singleton_axes=True)`（[module.py L301-L325](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/protocols/module.py#L301-L325)）；`partial_dtensor` 的同一路径才调用 `resolve_mesh`（[module.py L399-L404 与 L442-L446](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/protocols/module.py#L399-L446)）；state-dict 迁移另走 `get_activated_mesh(unfold_dp_axes(...))`（[spmd_types.py L66-L95](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/spmd_types.py#L66-L95)）；MoE 的 token dispatcher 则直接取 `get_optional_mesh("ep")`（见 ch8）。这几条路径共用同一套解析机制，但入口各不相同。
 
 整个解析过程可以用一条流水线概括：
 
@@ -578,7 +582,7 @@ flowchart LR
 
 ### 概念
 
-上一章的解析流水线按轴组合分发 mesh，MoE 层正是靠这一机制把计算切成两个区域：**dense region**（attention 与 shared expert 等，沿用 dense 视图）与 **expert region**（routed experts，用 sparse 视图）。expert region 需要的不是 hidden 维度的 TP 视角，而是"专家分布"视角：`efsdp` 表示专家参数的 FSDP 分片域，`ep` 表示专家分布到哪些 rank，`tp` 的度数不再单独成轴，而是被折进 `efsdp` 的计算里（`efsdp = dps*cp*tp//ep`），所以 sparse mesh 只有四轴 `(pp, dpr, efsdp, ep)`。
+上一章把解析层的 consumer 入口分列开来，MoE 层正是其中一个 consumer，它把计算切成两个区域：**dense region**（attention 与 shared expert 等，沿用 dense 视图）与 **expert region**（routed experts，用 sparse 视图）。expert region 的视图里没有独立的 `tp` 轴（这是 sparse 形状的直接事实），可以理解为它需要的不是 hidden 维度的 TP 视角而是"专家分布"视角（这句是教学解释）：`efsdp` 表示专家参数的 FSDP 分片域，`ep` 表示专家分布到哪些 rank，`tp` 的度数不再单独成轴，而是被折进 `efsdp` 的计算里（`efsdp = dps*cp*tp//ep`），所以 sparse mesh 只有四轴 `(pp, dpr, efsdp, ep)`。
 
 这里必须把三层证据分开：**路由记录**是 router 输出的 top-k 专家选择，**mesh 选择**是 `ParallelDims` 提供 `ep` 轴 mesh 给下游，**真实通信**是 token dispatcher 执行的 all-to-all 与专家计算。**`parallel_dims.py` 只做中间这一层**，它构造并返回 sparse mesh，不执行任何 token 路由或 all-to-all，把"提供 mesh"写成"完成路由"是这篇文章最需要防越界的地方。
 
@@ -609,15 +613,18 @@ full_sparse_mesh = unflatten_mesh(
 )
 ```
 
-配合 fwd/bwd 视图（[L276-L279](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L268-L279)）与 `spmd_sparse_mesh()`（[L431-L435](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L431-L435)），固定配置下 `(pp, dpr, efsdp, ep) = (2, 2, 2, 4)`，乘积回到 32，`spmd_sparse_for_fwdbwd` 则是去掉 `pp` 的 `(dpr, efsdp, ep)` 三维子 mesh，只在 `spmd_types` 且 `ep > 1` 时写入。`resolve_mesh` 的 in-band 选择（`spmd_types` 保留 `dp/cp/tp/ep`，`partial_dtensor` 只保留 `tp/ep`）决定了 expert region 边界最终拿到的是 `ep`（以及 `partial_dtensor` 下与它相邻的 `tp`）相关 mesh。
+配合 fwd/bwd 视图（[L276-L279](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L268-L279)）与 `spmd_sparse_mesh()`（[L431-L435](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L431-L435)），固定配置下 `(pp, dpr, efsdp, ep) = (2, 2, 2, 4)`，乘积回到 32，`spmd_sparse_for_fwdbwd` 则是去掉 `pp` 的 `(dpr, efsdp, ep)` 三维子 mesh，只在 `spmd_types` 且 `ep > 1` 时写入。需要澄清的是：expert region 实际拿到的 mesh 由 `RoutedExperts.parallelize()` 直接取 `get_optional_mesh("ep")` 获得（见下），并不经过 `resolve_mesh`；`resolve_mesh` 的 in-band 过滤只服务于 placement/模块分发路径，两者不要混淆。
 
-下游的真实分工可以落到具体文件：MoE 层的 `GroupedExperts.parallelize()` 把 `ep` mesh 接进 token dispatcher（[models/common/moe.py L172-L182](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/models/common/moe.py#L172-L182)）：
+下游的真实分工可以落到具体文件：MoE 层的 `RoutedExperts.parallelize()`（moe.py 里 `GroupedExperts` 是另一个类）把 `ep` mesh 接进 token dispatcher（[models/common/moe.py L123-L182](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/models/common/moe.py#L123-L182) 的类定义与方法）：
 
 ```python
 def parallelize(self, parallel_dims) -> None:
     """Parallelize the grouped experts, then wire the EP mesh on the
     dispatcher so dispatch/combine see the right mesh at runtime."""
     super().parallelize(parallel_dims)
+    # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
+    # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
+    # DeepEPTokenDispatcher.
     self.token_dispatcher.wire_meshes(
         ep_mesh=parallel_dims.get_optional_mesh("ep"),
     )
@@ -629,13 +636,13 @@ def parallelize(self, parallel_dims) -> None:
 
 ### 概念
 
-第四章用例 E 把序列长度检查划给了调用方并预告了本章的源码位置，现在兑现：**`seq_len_divisor` 是序列长度约束的"因子提供者"**：**TP（sequence parallel）要求 `seq_len` 能被 TP 度数整除，CP 在默认开启 load balancing 时要求 `seq_len` 能被 `2 × cp` 整除**，所以因子是 `tp × (cp * 2)`。源码注释分别引用了 torchtitan 的 PR 讨论与 PyTorch 的 [\_attention.py L1246](https://github.com/pytorch/pytorch/blob/4f62dcc/torch/distributed/tensor/experimental/_attention.py#L1246)（注意这是源码注释里自带的短 commit 引用）。**关键边界是：这个 property 只返回约束因子，`ParallelDims` 构造器不接收 `seq_len` 参数，也不会主动抛序列长度错误**，执行检查的是调用方。
+上一章把 sparse mesh 放回 MoE 边界后，剩下的调用方约束只剩序列长度这一类；第四章用例 E 已把它划给调用方并预告了本章的源码位置，现在兑现：**`seq_len_divisor` 是序列长度约束的"因子提供者"**：**TP（sequence parallel）要求 `seq_len` 能被 TP 度数整除，CP 在默认开启 load balancing 时要求 `seq_len` 能被 `2 × cp` 整除**，所以因子是 `tp × (cp * 2)`。源码注释分别引用了 torchtitan 的 PR 讨论与 PyTorch 的 [\_attention.py L1245-L1246](https://github.com/pytorch/pytorch/blob/4f62dccbdae90d266e3cce4a499b77008f8f840f/torch/distributed/tensor/experimental/_attention.py#L1245-L1246)（整除断言所在；这是对源码注释里短 commit 的完整化）。**关键边界是：这个 property 只返回约束因子，`ParallelDims` 构造器不接收 `seq_len` 参数，也不会主动抛序列长度错误**，执行检查的是调用方。
 
-属性区的另一个用途是配置审计：`dp_enabled`/`fsdp_enabled`/`tp_enabled`/`pp_enabled`/`ep_enabled` 这些布尔属性把"某个轴是否启用（degree > 1）"变成可查询的状态，`non_data_parallel_size = cp × tp × pp` 则表示同一份数据由多少个非数据并行 rank 共同处理，即模型并行区域的规模。
+属性区的另一个用途是配置审计：`dp_enabled`/`fsdp_enabled`/`tp_enabled`/`pp_enabled`/`ep_enabled` 这些布尔属性把"某个轴是否启用（degree > 1）"变成可查询的状态，`non_data_parallel_size = cp × tp × pp` 则表示同一份数据由多少个非数据并行 rank 共同处理，即模型并行区域的规模（这是对 property 命名的教学解释，源码没有展开它的语义）。
 
 ### 模型/场景
 
-`tp=2, cp=2` 时 `seq_len_divisor = 2 * (2*2) = 8`，所以 `seq_len=16` 可整除、`seq_len=10` 不可整除。但"10 会怎样"取决于调用方：trainer 在启动时检查并抛错，配置审计器把它标成 `ERROR`，`ParallelDims` 本身对此一无所知。真正执行检查的 [trainer.py L292-L305](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/trainer.py#L292-L305)（同一 commit）值得贴出来，因为它的公式与 property 略有差异：
+`tp=2, cp=2` 时 `seq_len_divisor = 2 * (2*2) = 8`，所以 `seq_len=16` 可整除、`seq_len=10` 不可整除。但"10 会怎样"取决于调用方：配置审计器把它标成 `ERROR`；trainer 检查的是**每个 PP microbatch 的 token-count**（`config.training.num_tokens_per_microbatch_per_dp_rank`），在"每个 DP rank 每 microbatch 恰处理一条序列"的学习假设下它等于 `seq_len`，此时 10 会触发错误，batch 更大则不一定。`ParallelDims` 本身对此一无所知。真正执行检查的 [trainer.py L292-L305](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/trainer.py#L292-L305)（同一 commit）值得贴出来，因为它的公式与 property 略有差异：
 
 ```python
 seq_len_divisor = (
@@ -668,22 +675,24 @@ def seq_len_divisor(self):
     return self.tp * (self.cp * 2)
 ```
 
-配置审计的落点是 [10_parallel_config_advisor.py](10_parallel_config_advisor.py)：它按 `ERROR`（硬性失败，退出码 1）/ `WARN` / `CHECK` / `INFO` 分级输出，`ERROR` 覆盖 dense 乘积与 EP 整除等 `ParallelDims` 自己的 invariant，`WARN/CHECK` 覆盖 `seq_len_divisor`、显存估算、单节点内网卡数等调用方层面的约束，`tests/test_validation.py` 把 A-E 五个用例同时映射到 `ParallelDimsLite` 与审计器，保证"构造器行为"与"审计器行为"两条实现路径一致。**注意审计通过只说明配置约束满足，不等于训练有效**，这是配置层与训练效果层的边界。
+（这个代码块是源码原样转录，其中 `pull/640#discussion_r1849481001` 是源码注释自带的非固定链接，不作为本文的证据链接；可复核证据是固定 commit 下 [seq_len_divisor 实现（L601-L609）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L601-L609)。）
+
+配置审计的落点是 [10_parallel_config_advisor.py](10_parallel_config_advisor.py)：它按 `ERROR`（硬性失败，退出码 1）/ `WARN` / `CHECK` / `INFO` / `VALID` 分级输出，其中 dense 乘积、EP 整除与 `seq_len_divisor` 都是 `ERROR`/`VALID` 二值硬检查，`WARN`/`CHECK`/`INFO` 覆盖层数按 pp 均分、头数与 TP/CP 兼容性、expert 映射、TP/EP 是否跨节点边界等调用方层面的提示，脚本没有显存估算类检查。测试映射方面，`tests/test_validation.py` 的 A/D 只测 `ParallelDimsLite`、E 只测审计器、仅 B/C 跨两条路径，所以"构造器行为"与"审计器行为"的一致性只在这两例上被共同验证，其余是单路径覆盖，不能当成 production parity 保证。**注意审计通过只说明配置约束满足，不等于训练有效**，这是配置层与训练效果层的边界。
 
 ## 复现、证据边界与常见误解
 
 ### 如何复现
 
-实验入口以 [notes/README.md](notes/README.md) 为唯一事实基线，从 `torch/parallel_dims_lab` 目录执行，按证据目的分四组：
+前面九章的公式与形状都来自固定 commit 的源码，本章把它们收束成可复现的实验与证据边界。实验入口以 [notes/README.md](notes/README.md) 为唯一事实基线，从 `torch/parallel_dims_lab` 目录执行，按证据目的分四组：
 
-| 实验组 | 命令 | 允许得出的结论 |
-| --- | --- | --- |
-| rank/mesh | `python [02_mesh_coordinates.py](02_mesh_coordinates.py)`、`python [07_mesh_inspector.py](07_mesh_inspector.py)`、`python -m pytest [tests/test_mesh_shapes.py](tests/test_mesh_shapes.py) -q` | 坐标、axis group、mesh 形状与公式实现正确 |
-| parallelism simulation | `python [03_dp_fsdp_sim.py](03_dp_fsdp_sim.py)`、`python [04_tp_mlp_sim.py](04_tp_mlp_sim.py)`、`python [05_cp_pp_planner.py](05_cp_pp_planner.py)`、`python [06_parallel_dims_lite.py](06_parallel_dims_lite.py)` | 数学模型与 CPU 模拟路径一致 |
-| sparse/gradient | `python [08_moe_router_sim.py](08_moe_router_sim.py)`、`python [09_gradient_accounting.py](09_gradient_accounting.py)`、`python -m pytest [tests/test_router.py](tests/test_router.py) -q` | 记录级别的路由/统计逻辑正确 |
-| config audit | `python [10_parallel_config_advisor.py](10_parallel_config_advisor.py) --world-size 32 --gpus-per-node 8 --dp-replicate 2 --dp-shard 2 --cp 2 --tp 2 --pp 2 --ep 4 --seq-len 8192 --num-layers 32 --num-heads 32 --num-experts 8 --spmd-backend spmd_types --rank 0`、`python -m pytest [tests/test_validation.py](tests/test_validation.py) -q` | 审计器与当前约束的对应关系正确 |
+| 实验组 | 脚本 | 命令 | 允许得出的结论 |
+| --- | --- | --- | --- |
+| rank/mesh | [02_mesh_coordinates.py](02_mesh_coordinates.py)、[07_mesh_inspector.py](07_mesh_inspector.py)、[tests/test_mesh_shapes.py](tests/test_mesh_shapes.py) | `python 02_mesh_coordinates.py`；`python 07_mesh_inspector.py`；`python -m pytest tests/test_mesh_shapes.py -q` | 坐标、axis group、mesh 形状与公式实现正确 |
+| parallelism simulation | [03_dp_fsdp_sim.py](03_dp_fsdp_sim.py)、[04_tp_mlp_sim.py](04_tp_mlp_sim.py)、[05_cp_pp_planner.py](05_cp_pp_planner.py)、[06_parallel_dims_lite.py](06_parallel_dims_lite.py) | `python 03_dp_fsdp_sim.py`；`python 04_tp_mlp_sim.py`；`python 05_cp_pp_planner.py`；`python 06_parallel_dims_lite.py` | 数学模型与 CPU 模拟路径一致 |
+| sparse/gradient | [08_moe_router_sim.py](08_moe_router_sim.py)、[09_gradient_accounting.py](09_gradient_accounting.py)、[tests/test_router.py](tests/test_router.py) | `python 08_moe_router_sim.py`；`python 09_gradient_accounting.py`；`python -m pytest tests/test_router.py -q` | 记录级别的路由/统计逻辑正确 |
+| config audit | [10_parallel_config_advisor.py](10_parallel_config_advisor.py)、[tests/test_validation.py](tests/test_validation.py) | `python 10_parallel_config_advisor.py --world-size 32 --gpus-per-node 8 --dp-replicate 2 --dp-shard 2 --cp 2 --tp 2 --pp 2 --ep 4 --seq-len 8192 --num-layers 32 --num-heads 32 --num-experts 8 --spmd-backend spmd_types --rank 0`；`python -m pytest tests/test_validation.py -q` | 审计器与当前约束的对应关系正确 |
 
-整套验证也可以一键执行：`python -m pytest tests/ -q`。唯一真实 collective 演示是 CPU/Gloo 的 `torchrun --standalone --nproc-per-node=4 [01_collectives.py](01_collectives.py)`，它只证明该演示的通信逻辑在 CPU 上成立；其余脚本全部是纯 Python/CPU 模拟，**任何脚本的输出都不能写成真实 GPU 通信、吞吐、显存或训练质量 benchmark**。
+整套验证也可以一键执行：`python -m pytest tests/ -q`。唯一真实 collective 演示是 CPU/Gloo 的 `torchrun --standalone --nproc-per-node=4 01_collectives.py`（脚本见 [01_collectives.py](01_collectives.py)），它只证明该演示的通信逻辑在 CPU 上成立；其余脚本全部是纯 Python/CPU 模拟，**任何脚本的输出都不能写成真实 GPU 通信、吞吐、显存或训练质量 benchmark**。
 
 ### 证据层级
 
@@ -705,14 +714,14 @@ def seq_len_divisor(self):
 5. **序列长度检查不在构造器**。`ParallelDims` 不接收 `seq_len`，检查在 trainer 与配置审计器；
 6. **mesh 形状验证不等于参数分片已发生**。`_validate_meshes()` 只核对轴的 size，`fully_shard()` 是否真的沿 `dp_shard` 分片、TP 是否真的切了权重，是下游并行实现的事。
 
-最后回到文章边界：**`ParallelDims` 是并行维度和 mesh 的编排层**。它负责配置入口、合法性校验、视图构造与解析，把正确的 `DeviceMesh` 交给下游；FSDP 参数分片、TP 集合通信、CP 注意力通信、PP 调度和 MoE token 路由分别由 `torchtitan/distributed/` 下的 `fsdp.py`、`tensor_parallel.py`、`context_parallel/`、`pipeline_parallel.py` 以及模型的 MoE 层实现。它不是完整的通信实现，也不是 GPU 吞吐、显存或训练效果的 benchmark，读到这里，驱动问题里的三个问号都有了可回溯的答案：多视图来自四类下游代码的分组诉求，整数约束由 `_validate()`/`_validate_meshes()` 两级守恒保证，取对 mesh 由 backend 过滤、enabled 过滤与 identity 缓存三层机制完成。
+最后回到文章边界：**`ParallelDims` 是并行维度和 mesh 的编排层**。它负责配置入口、合法性校验、视图构造与解析，把正确的 `DeviceMesh` 交给下游；FSDP 参数分片、TP 集合通信、CP 注意力通信、PP 调度和 MoE token 路由分别由 `torchtitan/distributed/` 下的 `fsdp.py`、`tensor_parallel.py`、`context_parallel/`、`pipeline_parallel.py` 以及模型的 MoE 层实现。它不是完整的通信实现，也不是 GPU 吞吐、显存或训练效果的 benchmark，读到这里，驱动问题里的三个问号都有了可回溯的答案：多视图来自四类下游代码的分组诉求，整数约束由 `_validate()` 的度数校验与 `_validate_meshes()` 的逐轴 size 核对保证，取对 mesh 由 backend 过滤、enabled 过滤与 identity 缓存三层机制完成。
 
 ### 串联关系
 
 把全文件串成一条调用链，各层职责如下：
 
 1. 配置层（`torchtitan/config/configs.py`）：`ParallelismConfig` 持有六个并行度与 `spmd_backend`，`ParallelDims.from_config()` 只做字段映射；
-2. 校验层（`parallel_dims.py`）：`__post_init__()` → `_validate()` → `_mesh_exist()`，保证度数合法并判定每个轴是否存在；
+2. 校验层（`parallel_dims.py`）：`__post_init__()` → `_validate()`，保证度数合法；`_mesh_exist()` 在 `build_mesh()` 与查询路径中决定各轴的真实/fake 语义；
 3. 构造层（`parallel_dims.py`）：`build_mesh()` → `_validate_meshes()`，从一维 world mesh unflatten 出全部视图并核对形状；
 4. 解析层（`parallel_dims.py`）：`get_optional_mesh()` / `get_mesh()` / `get_activated_mesh()` / `resolve_mesh()` / `resolve_shared_mesh()`，按 backend 与启用状态取 mesh；
 5. 消费层（`torchtitan/distributed/` 与模型代码）：`fully_shard()`、`tensor_parallel.py`、`pipeline_parallel.py`、MoE 的 token dispatcher 消费返回的 mesh，执行真实的参数分片与集合通信。
@@ -725,14 +734,17 @@ def seq_len_divisor(self):
 - [NCCL 与 NVIDIA TOPO](../nccl/readme.md)：区分 mesh 逻辑轴与真实硬件拓扑；
 - [再探 CUDA Graph：核心机制、多图复用以及 Dual AR 模型的统一覆盖优化](../cuda-graph/readme-2.md)：同为 torch 系列 understand-reproduce 文章，CUDA Graph 静态执行与并行维度的相邻话题；
 - [DeviceMesh 官方教程](https://pytorch.org/tutorials/recipes/distributed_device_mesh.html) 与 [DTensor 文档](https://docs.pytorch.org/docs/stable/distributed.tensor.html)：`DeviceMesh` 与 placements 的 API 语义；
+- [Tensor Parallel 官方教程](https://docs.pytorch.org/tutorials/intermediate/TP_tutorial.html)：`tp` 轴语义的官方背景；
 - 源码本体：[parallel_dims.py @ d6555c4c](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py)，以及同 commit 的 [trainer.py](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/trainer.py)、[spmd_types.py](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/spmd_types.py)、[protocols/module.py](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/protocols/module.py)、[models/common/moe.py](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/models/common/moe.py)。
 
 <!-- /learn-write 自动检查报告
 双轨检查：PASS。概念框架先行（第 1-2 章建立"视图/轴"概念），模型/场景每章用固定 32-rank 或 (2,4) 网格手算，代码全部来自 torchtitan 固定 commit d6555c4c 的 parallel_dims.py 及其下游文件；章节顺序严格遵循"概念 → 模型/场景 → 代码"。
 叙事检查：PASS。开篇用对比 verl 与 torchtitan 的真实动机引入，无模板句式；路线图 4 条；致谢自然不点名；commit hash 在代码引用中自然出现；设问句出现在驱动问题与"为什么需要多视图"两处并给出回答；个人判断收进括号（如 loss=8 数几遍）。
 深度检查：understand-reproduce → 实际深度 understand-reproduce，PASS。概念讲解 + API 使用示例 + 关键原理分析，止步于"能正确使用并读懂输出"；未深入 DeviceMesh 内部实现、未做性能分析。
-递进推导检查：PASS。每章开头具体引用前一章结论（ch2 承接固定配置预告、ch4 呼应 _validate 预告、ch8 承接解析流水线、ch9 兑现用例 E 预告；其余如"派生量敢用整除除法是因为构造器已保证""缓存注释预告了 identity 缓存设计"）；无 checklist 式概念罗列；约束映射融入行文（fake backend 在 _mesh_exist 与 unflatten_mesh 两处自然呼应）；设计演进（一维 → unflatten 多视图 → backend 分支）明确标注为教学顺序而非 git 历史；"为什么不用 X"模式用于 fake backend 与 identity 缓存（X 解决什么问题 → 场景为什么不需要 → 结论）；无 ASCII 艺术，图表用 mermaid 与 markdown 表格。
+递进推导检查：基本达标（ch2/ch4/ch5/ch6/ch8/ch9 开头承接前章结论，ch7 承接 ch6 结尾的"四种语义"预告；严格逐章递进仍有优化空间，第三方 review 已记录）。无 checklist 式概念罗列；约束映射融入行文（fake backend 在 _mesh_exist 与 unflatten_mesh 两处自然呼应）；设计演进（一维 → unflatten 多视图 → backend 分支）明确标注为教学顺序而非 git 历史；"为什么不用 X"模式用于 identity 缓存；无 ASCII 艺术，图表用 mermaid 与 markdown 表格。
 交叉引用建议：正文已链接 torch-distributed、rlhf readme-2、rlhf readme-4、nccl 四篇已发布文章；lab 侧引用 02/06/07/08/10 脚本与三个 pytest 文件。若后续发布，建议在 README 的 torch 部分与其他 mesh 相关文章建立双向索引。
 本轮 learn-write 修复：P0/P1 轮（mermaid 边标签加引号、ch7 补多轴成功例子、ch2/ch4/ch8/ch9 补前节结论式过渡句）；P2 轮（ch1 补"具体而言"处理流程、ch10 补"串联关系"小节、ch2 docstring 链接精确到 L30-L40、ch3 补 slime/fsdp 交叉引用、ch8 补 dense/sparse 对照表、ch9 恢复加粗范围、ch10 复现表与 01 脚本补链接、参考列表补 cuda-graph/readme-2）。P2 中 README 冗余条目清理涉及 README 更新，按用户约束未处理。
+第三方深度审核修复（P0：轴组方向与 lab fiber 语义区分、process group 复用表述、构造链 _mesh_exist 归位、_validate_meshes 归因修正、loss 子 mesh 坐标方向、幂等表述、resolve_shared_mesh 有序 tuple、RoutedExperts 归属、optimizer 链接路径、PR 链接说明；P1：trainer token-count 量纲、singleton 例外限定、advisor 精确分级与测试映射、consumer 入口分列、代码块节选标注与恢复、锚点扩展、复现表命令可执行、章节承接；P2：fake 两层机制、推断降级标注、形状预告、TP 教程、核心节选标注、注释自证修正）。P2-5 中英文空格未改：repo 实际惯例为加空格，与 style-guide 文字矛盾，需单独决策。
+第二轮第三方审核修复（P1：驱动问题与前言中的 loss 全视图矛盾、_validate_meshes 归因残留三处、singleton/fake/enabled 三层语义区分、MoE runtime 与 resolve_mesh 解耦、module.py 锚点扩至 L301-L325；P2：节选声明收窄为 Python 源码块、_attention 正文短 SHA 完整化、时态/历史归因降级为限定表述、unflatten/flatten 对象关系精确化；另按建议在 ch2 补 DeviceMesh 官方教程行内链接）。中英文空格维持不动（争议项裁决：style-guide 文字与 repo 惯例矛盾，待单独决策）。
 -->
 
