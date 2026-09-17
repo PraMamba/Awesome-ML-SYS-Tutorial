@@ -96,6 +96,9 @@ $$
 
 - [dots3-note Preview：为了挑战 IMO，LLM 选手做了什么](./sglang/dots3-note/readme.md)：TEMPO 的 macro-step 与生成式 critic 如何重塑超长程 agentic RL，以及 40 到 50 小时、数千轮交互的 agent 给 inference 带来的新问题——512K 窗口下 MLA 与 hybrid SWA 的 KV 显存账、上下文裁剪导致的 cache 失效与周期性 re-prefill，以及 DSA indexer 在重算中的开销占比。同样刊载于[英文版本](./sglang/dots3-note/readme-en.md)和[知乎](https://zhuanlan.zhihu.com/p/2072662462084731844)。
 - [Kimi K1.5: Long Context RL 的成功实践](./rlhf/partial-rollout/readme.md)：Long Context RLHF 的工业级实现，一直很喜欢 kimi 团队的技术报告，同样刊载于 [Kimi K1.5: Long Context RL 的成功实践](https://zhuanlan.zhihu.com/p/1894282607325344277)。
+- [Agent Harness 如何接入 RL：2026 年开源基础设施的真实架构版图](./rlhf/agent-harness-rl/readme.md)：把现成 agent harness 保留自己的执行循环、只在 LLM API 边界接入训练基础设施的源码级调研——两种所有权与三种集成边界、一次模型调用至少要保存的调用元组、重分词漂移为什么让 `log pi` 不再是原条件概率、十个候选实现与四个反例、捕获之后的分段与奖励分组/policy version/retry 去重等不变量，以及一条面向选型的验收链。本文只做官方资料与源码的静态审计，所有引用锁定在本地复核过的 commit 上，没有跑 GPU 训练。
+- [让 Token 持续流动：16 个开源 RL 框架的异步训练基础设施横向调研](./rlhf/async-rl-training-landscape/readme.md)：把 16 个仍在活跃维护的 RL / post-training 框架固定 commit 逐个读源码后的横向调研——同步 RL 循环的七个阶段与 decode 被 KV cache 读带宽锁死的成本、异步化的四笔账单（staleness、权重同步、部分 rollout、数据通路与 buffer）、七个维度的因果依赖、每个断言落到文件行号的全局总览表，以及下一波浪潮的五个压力点。本文不做任何框架实测。
+- [把显存墙翻译成切分账：六个大模型训练后端的横向调研](./rlhf/training-backend-landscape/readme.md)：沿九个维度拆解六个大模型训练后端——并行组合能力、每个参数在每张卡上的字节预算、计算-通信重叠、流水线气泡、激活显存与重算、精度策略与数值一致性、检查点重分片与容错、MoE 与 EP，以及模型接入的配置面。数字要么来自文档、要么是读者可自行复算的算术，文档与源码的冲突单列一节记录。
 - [Rule-based Reward](https://zhuanlan.zhihu.com/p/13211508979)：这篇只有知乎，浅浅写了写，老实说原文写的我并不太喜欢，但是 determined reward 确实 charming。
 - [SWE-Bench：如何构造 LLM 时代的优秀 Benchmark](https://zhuanlan.zhihu.com/p/16292266518)，基于 SWE-Bench 的论文阅读笔记，如何构造好的 benchmark 以为 post-training 提供细粒度 reward，是永恒且美妙的话题。
 - [浅析主流 Alignment 算法与 NeMo-Aligner 框架](https://zhuanlan.zhihu.com/p/5220718268)
@@ -160,6 +163,8 @@ $$
 ### Distributed Training & Communication
 
 - [FSDP2 系统学习教程](./torch/fsdp2/readme.md)：从分布式训练基础到组合并行（FSDP+TP），共 7 个阶段、22 个可运行脚本的系统教程，需要 PyTorch >= 2.4。
+- [DeepEP 深度学习笔记：从 MoE 的 token 搬运，到拓扑、显存布局与计算通信重叠](./torch/deepep/deep-dive.md)：从 token、token-rank 对与 token-expert 对三层计数对象讲到 dispatch/combine 的矩阵写法与可复算的通信量，再逐层拆开 V1 的 normal 与 low-latency 两条路径、V2 的 `ElasticBuffer` 与 `EPHandle` 接口、SM 与 QP 的解析估算，以及 Megatron-LM、SGLang、verl 与 vLLM 四条接入边界。配套两个纯 CPU 教学实现（单进程与四 rank Gloo）和逐式、逐图复核记录，所有源码链接锁定固定 commit。
+- [DualPipe 深度解析：当流水线填满之后，通信躲到哪里去了](./torch/dualpipe/deep-dive.md)：先把调度边界上的气泡和 stage 内部的通信等待分开，再沿 GPipe、1F1B、Zero Bubble、DualPipe、DualPipeV 一条时间线推导稳态配对下标、重算气泡与显存的统一口径，并逐条给出官方 440 行骨架的源码事实与 PyTorch、Megatron 两侧的分层关系。配套纯 CPU 的调度模拟与数值等价性验证，不做任何 GPU 实测。
 - [Pending Review] [手搓 Tensor Parallelism](./torch/tensor-parallelism/readme.md)：关于 Tensor Parallelism 的实现与实践。
 - [NCCL 与 NVIDIA TOPO](./torch/nccl/readme.md)：NCCL 的入门与 NVIDIA 显卡的检测，同样刊载于[NCCL 与 NVIDIA TOPO](https://zhuanlan.zhihu.com/p/6160835906)。
 - [NCCL and SGLang](./torch/nccl/readme_en.md)：NCCL 在 SGLang 中的应用，其实和中文内容非常接近，但是额外刊载了一些并行策略的内容。我应该不会修缮完成这个笔记，而是单独写笔记来记录并行策略。
