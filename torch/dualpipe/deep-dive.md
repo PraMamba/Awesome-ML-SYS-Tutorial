@@ -1282,7 +1282,6 @@ flowchart TD
 - [`codes/01_split_backward_minimal.py`](./codes/01_split_backward_minimal.py)：反向拆分的最小可运行示例，验证「先返回输入梯度、后补参数梯度」的数值等价性。
 - [`codes/02_schedule_sim.py`](./codes/02_schedule_sim.py)：DualPipe / DualPipeV 的 CPU 调度模拟器，逐行镜像官方 `step()` 的结构，输出任务计数、关键路径、气泡与气泡率。
 - [`codes/README.md`](./codes/README.md)：两个实验的环境、运行命令、实测输出与结论边界。
-- [`notes/`](./notes/)：`IMAGE-SURVEY-*.md` 是参考资料 433 张抽取图的逐张核对记录，`MATH-VERIFY.md` 是逐式复核记录，`IMAGE-VERIFY.md` 是正文采用图的独立复核记录。
 
 ---
 
@@ -1316,11 +1315,9 @@ flowchart TD
 
 ---
 
-## 附录 B：逐式与逐图复核索引
+## 附录 B：公式与图片的复核入口
 
-本文的每一个公式与每一张图都有对应的核对记录，便于第三方复核。
-
-**数学**：逐式记录见 [`notes/MATH-VERIFY.md`](./notes/MATH-VERIFY.md)，每行给出「公式 → 来源（论文公式号 / README 表格 / 源码行号）→ 复算结果 → 结论」。其中三组关键式可以在本地复跑：
+**数学**：正文的三组关键式可以在本地复跑，各自验证的结论见下一节「本文的验证范围」，运行环境与实测输出见 [`codes/README.md`](./codes/README.md)：
 
 ```bash
 python torch/dualpipe/codes/01_split_backward_minimal.py
@@ -1328,7 +1325,7 @@ python torch/dualpipe/codes/02_schedule_sim.py --p 8 --m 20
 python torch/dualpipe/codes/02_schedule_sim.py --sweep
 ```
 
-**图片**：参考资料里属于「写作素材」的 433 张图片（论文 353、教材页 20、社区文章 60）的逐张核对记录在 [`notes/IMAGE-SURVEY-*.md`](./notes/)，每份表格覆盖该目录的全部文件，逐行给出「文件名 / md 引用行 / 图号 / 类别（论文插图、公式截图、表格截图、装饰）/ 读图后的事实描述 / 采用结论与理由 / 建议章节」。**未采用的图同样逐张写明了理由**，其中纯公式截图与表格截图全部判为「不采用」，需要表格内容时转写为 Markdown 表格。本目录 `pics/` 下的 32 张图与这些记录逐一对齐，来源与 sha256 见 [`pics/README.md`](./pics/README.md)。
+**图片**：`pics/` 下的 30 张图与正文引用一一对应，每张的来源与 sha256 见 [`pics/README.md`](./pics/README.md)。
 
 **已更正的图号错配**（这些是核对过程中发现的、在草稿与常见转载里都存在的错误）：Megatron-LM Figure 4 是 `2a3ac338…` 而不是 `648f402f…`（后者是 Figure 2）；PipeDream-2BW Figure 2 是 `ec0c258b…` 而不是 `e1dfea35…`（后者是 Figure 3）；Zero Bubble Figure 3 是 `e2c1ba8e…` 而不是 `7828028c…`（后者是 Figure 2），Figure 8 是 `53647889…` 而不是 `3955441b…`（后者是 Figure 7）；DeepSeek-V3 Figure 5 的图块里不含 Table 2。
 
@@ -1360,7 +1357,7 @@ python torch/dualpipe/codes/02_schedule_sim.py --sweep
 
 递进推导检查：PASS。驱动问题（「这段独立计算从哪里来」）在第一章末尾、读者同时握有气泡公式与 MoE 通信结构之后出现，并在第五、九章两次回收；每节开头都说明从上一节的哪个结论推导而来；概念章节有子步骤展开（2.2 的形状例子、3.4 的口径换算、7.2 的两端代入）与总结判断；约束映射融入行文而没有独立成表；设计方案展示了 GPipe → 1F1B → Zero Bubble → DualPipe → DualPipeV 的演进路径，并给出同设备数口径下的替代方案对比表；「为什么不用 X」按「X 解决什么 → 本场景为什么不需要 → 结论」展开（第九章对 TBO/SBO 的处理）；模型介绍先全貌（DeepSeekMoE 的专家切分）再进入通信特征；无 ASCII 字符画（已把 Megatron 的节点树改为 Markdown 表格）。
 
-第三轮复核（`notes/REVIEW-deep-r3b.md` 的 10 条 P0 / 8 条 P1 / 26 条 P2 已全部处理，处理记录见 `REVISION.md` 第 3 轮）：
+第三轮复核（`docs/reviews/deep-review-r3b.md` 的 10 条 P0 / 8 条 P1 / 26 条 P2 已全部处理，处理记录见 `revision.md` 第 3 轮）：
 - 主口径已改为 $F\&B = F + B_{\mathrm{full}}$；依据是官方 `dualpipe.png` / `dualpipev.png` 逐列取色（每行 66 个单位、空闲 6 个单位）与 V3 报告 Figure 4，详见 §7.2 与 §7.3。
 - `codes/02_schedule_sim.py` 的发送释放语义已按官方提交点修正，修好后 $p=8,m=20$ 与 $p=4,m=10$ 都复现出官方图的 66 / 6。
 - 全文 $\LaTeX$ 行内公式由 `\(…\)` 改为 `$…$`（本地已发布的同类文章均用后者）；`pics/` 从 32 张调整为 30 张，与正文引用一一对应。

@@ -2,7 +2,7 @@
 
 本目录保存 `torch/dualpipe/deep-dive.md` 正文实际引用的图片副本。命名沿用 `torch/deepep/pics/` 与 `transformers/kda_linear_attention/pics/` 的惯例：`<来源简称>-fig<N><子图>-<内容 slug>.<ext>`；官方仓库图保留原名。**所有图片都是从 `references/` 或上游锁定 revision 直接复制，不重绘、不裁剪。**
 
-逐张选择依据与「未采用图的理由」记录在 `notes/IMAGE-SURVEY-*.md`（12 个文件，覆盖 `references/` 下全部 433 张写作素材图）。本目录只放正文真正引用的图。
+逐张选择依据与「未采用图的理由」记录在 `docs/research/image-survey-*.md`（12 个文件，覆盖 `references/` 下全部 433 张写作素材图）。本目录只放正文真正引用的图。
 
 ## 0. 正文引用格式
 
@@ -68,9 +68,9 @@
 ## 4. 验证记录
 
 - 30 张图全部从 `references/` 或 `/workspace/algorithm/DualPipe/images/` 复制，sha256 见第 1 节；源文件在复制后未改动。
-- 文件名与 `notes/IMAGE-SURVEY-*.md` 的「建议文件名」逐一对齐；`dualpipe.png` / `dualpipev.png` 使用官方原名。
-- 逐张核对结果（图号、内容、类别）见对应的 `notes/IMAGE-SURVEY-*.md`；正文引用的每个路径都已用 `ls` 校验存在。
+- 文件名与 `docs/research/image-survey-*.md` 的「建议文件名」逐一对齐；`dualpipe.png` / `dualpipev.png` 使用官方原名。
+- 逐张核对结果（图号、内容、类别）见对应的 `docs/research/image-survey-*.md`；正文引用的每个路径都已用 `ls` 校验存在。
 - **第 3 轮修正**：删除了两张正文不再引用的图——`aiinfra-pp-zbv-schedule.png`（教材页把它标在「ZB-V schedule」标题下，但逐格颜色分类证明内容是 **ZB-H2**，与 Zero Bubble Figure 3 下栏 39/39 相同）与 `aiinfra-pp-interleaved-1f1b-vpp-layout.png`（与 Megatron-LM Figure 4 下栏逐格同内容，属重复引用）。同时 `terapipe-fig1d-token-pipeline.jpg` 的替代文件在第 2 轮已换好。
-- **第 2 轮修正**：`terapipe-fig1d-token-pipeline.jpg` 最初误取成了 TeraPipe Figure 1(c)（`b78a683e…`，GPipe 的 microbatch 流水线）；已改为真正的 Figure 1(d)（`a73bba64…`），sha256 见第 1 节。该错误由独立审查发现，并在 `notes/IMAGE-VERIFY.md` 记录。
+- **第 2 轮修正**：`terapipe-fig1d-token-pipeline.jpg` 最初误取成了 TeraPipe Figure 1(c)（`b78a683e…`，GPipe 的 microbatch 流水线）；已改为真正的 Figure 1(d)（`a73bba64…`），sha256 见第 1 节。该错误由独立审查发现，并在 `docs/reviews/image-verification.md` 记录。
 - 正文引用的图之外，正文引用的图片路径与 `pics/` 目录内容已用 `comm` 双向比对：无缺失、无多余。
 - **未做**：没有把图片与原页面逐张肉眼比对（核对任务用 `read_image` 读过全部 433 张写作素材图，但只对其中一部分做了尺寸与裁切复核）；没有重建官方仓库图的原始生成脚本。

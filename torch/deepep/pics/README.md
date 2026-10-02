@@ -4,11 +4,11 @@
 
 参考文献编号沿用仓库既有写法：DeepSeekMoE 为 arXiv `2401.06066v1`，DeepSeek-V3 Technical Report 为 arXiv `2412.19437v2`。
 
-文件名与 `torch/deepep/learn-plan.md` 的「参考图复用策略」一节逐一对齐（该节的采用清单 12 张与本目录一一对应），以免正文按计划写完后链接落空。这 12 张里包含计划早期只列了 7 张核心图之后补入的 5 张（`deepseek-moe-fig5-…`、`deepseek-moe-fig6-…`、`deepseek-v3-fig7a-…`、`deepseek-v3-fig7b-…`、`deepseek-v3-fig9-…`），它们与核心图一样都已经核过出处与内容、都在正文中有引用位置。另需说明，`pics/.superseded/` 目录里另有 4 张图，是同一批素材的早期命名副本，正文**不要**引用它们。
+文件名与 `torch/deepep/learn-plan.md` 的「参考图复用策略」一节逐一对齐（该节的采用清单 12 张与本目录一一对应），以免正文按计划写完后链接落空。这 12 张里包含计划早期只列了 7 张核心图之后补入的 5 张（`deepseek-moe-fig5-…`、`deepseek-moe-fig6-…`、`deepseek-v3-fig7a-…`、`deepseek-v3-fig7b-…`、`deepseek-v3-fig9-…`），它们与核心图一样都已经核过出处与内容、都在正文中有引用位置。另需说明，`archive/pics/` 目录里另有 4 张图，是同一批素材的早期命名副本，正文**不要**引用它们。
 
 ## 0. 正文引用格式
 
-与 `transformers/kda_linear_attention/kda_linear_attention-deep-dive.md` 保持一致：居中 `<div>` + `<img>` + 紧随其后的「图片来源」引用块。正文中的图片一律使用相对路径 `./pics/<文件名>`，alt 文本需包含「图号 + 图中关键读数」，方便无法加载图片时仍然可读。
+与 `transformers/kda_linear_attention/deep-dive.md` 保持一致：居中 `<div>` + `<img>` + 紧随其后的「图片来源」引用块。正文中的图片一律使用相对路径 `./pics/<文件名>`，alt 文本需包含「图号 + 图中关键读数」，方便无法加载图片时仍然可读。
 
 ```
 <div style="text-align: center; width: 100%; margin: 0 auto;">
@@ -256,7 +256,7 @@
 | 9 张表格渲染图 | 无 | 表格图 | **未采用**：`0ef10fd8`、`0f4a4ffd`、`11b08751`、`298010ee`、`3f30f593`、`5cd9a900`、`c467f176`、`d316874c`、`df311e60` 以及 `2ee407f8`（超参表）。合计 10 张，全部为论文表格的图片化产物，若需要应用 Markdown 表格重排，不应插图 |
 | 17 张公式块 | 无 | 公式块 | **未采用**。体积均小于 20 KB（2.7–10 KB），是论文式 (1)–(17) 的抽取产物；md 正文已用 LaTeX 还原，因此图片冗余 |
 
-小计：34 = 7 张正文图（采用 3 张）+ 10 张表格渲染图 + 17 张公式块。DeepSeekMoE 侧的逐张判读另有 `research/image-map-deepseek-moe.md` 一份更细的记录，其分类与本表一致。
+小计：34 = 7 张正文图（采用 3 张）+ 10 张表格渲染图 + 17 张公式块。DeepSeekMoE 侧的逐张判读另有 `docs/research/image-survey-deepseek-moe.md` 一份更细的记录，其分类与本表一致。
 
 ### 2.2 DeepSeek-V3 Technical Report（88 张）
 
