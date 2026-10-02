@@ -43,7 +43,7 @@ reading contrasts, but they are not treated as the current API.
 From this directory:
 
 ```bash
-cd torch/parallel_dims_lab
+cd torch/parallel_dims_lab/codes
 python -m pytest tests/ -q
 ```
 

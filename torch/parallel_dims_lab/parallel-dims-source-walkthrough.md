@@ -42,7 +42,7 @@ torchtitan 在 `MeshAxisName` 的 [docstring](https://github.com/pytorch/torchti
 
 ### 模型/场景
 
-用一个 `(2, 4)` 的行主序网格建立坐标直觉（与 [02_mesh_coordinates.py](02_mesh_coordinates.py) 的默认参数一致），8 个 rank 排成两行四列：
+用一个 `(2, 4)` 的行主序网格建立坐标直觉（与 [02_mesh_coordinates.py](codes/02_mesh_coordinates.py) 的默认参数一致），8 个 rank 排成两行四列：
 
 | rank | 坐标 (axis0, axis1) |
 | --- | --- |
@@ -101,7 +101,7 @@ FSDP 在真实训练后端里的完整机制（参数分片、梯度同步、与
 
 ### 模型/场景
 
-固定配置 `world_size=32, dpr=2, dps=2, cp=2, tp=2, pp=2, ep=4` 手算（先给公式再给数字，[06_parallel_dims_lite.py](06_parallel_dims_lite.py) 与 `tests/test_validation.py` 的用例 A 会原样复现这组结果）：
+固定配置 `world_size=32, dpr=2, dps=2, cp=2, tp=2, pp=2, ep=4` 手算（先给公式再给数字，[06_parallel_dims_lite.py](codes/06_parallel_dims_lite.py) 与 `codes/tests/test_validation.py` 的用例 A 会原样复现这组结果）：
 
 ```text
 batch = dpr * dps = 2 * 2 = 4
@@ -156,7 +156,7 @@ efsdp = fsdp * self.tp // self.ep
 
 ### 模型/场景
 
-六个验收用例把"`ParallelDims` 能构造"与"整个配置可运行"分开（`tests/test_validation.py` 覆盖 A-E，`tests/test_mesh_shapes.py` 覆盖 F 的 singleton 部分）：
+六个验收用例把"`ParallelDims` 能构造"与"整个配置可运行"分开（`codes/tests/test_validation.py` 覆盖 A-E，`codes/tests/test_mesh_shapes.py` 覆盖 F 的 singleton 部分）：
 
 | 用例 | 场景 | 预期行为 | 责任边界 |
 | --- | --- | --- | --- |
@@ -236,7 +236,7 @@ def _mesh_exist(self, name: str, degree: int) -> bool:
 
 ### 模型/场景
 
-固定 32-rank 配置下，各视图的形状如下表（[07_mesh_inspector.py](07_mesh_inspector.py) 与 `tests/test_mesh_shapes.py` 逐项断言这些形状）：
+固定 32-rank 配置下，各视图的形状如下表（[07_mesh_inspector.py](codes/07_mesh_inspector.py) 与 `codes/tests/test_mesh_shapes.py` 逐项断言这些形状）：
 
 | 视图 | 形状/来源 | 作用 |
 | --- | --- | --- |
@@ -599,7 +599,7 @@ flowchart LR
 | 下游消费者 | `fully_shard()`、TP 通信 | `wire_meshes(ep_mesh=...)`、token dispatcher |
 | 覆盖守恒 | 乘积 32 | 乘积 32 |
 
-用 16 个 token、8 个 expert、`ep=4` 的纯 Python 模型（[08_moe_router_sim.py](08_moe_router_sim.py) 的默认参数）说明"分桶 → 计算 → 还原"三段式：expert 按连续分块映射到 EP rank（8 个 expert 均分到 4 个 rank，每 rank 2 个），token 按 router 给出的 expert 归属进入对应 rank 的桶，每个桶内按 expert 顺序计算，最后按 token 原始位置还原输出。这个模型只验证路由记录与负载统计（`tests/test_router.py` 断言分桶与还原的正确性），**它不声称复现 TorchTitan 的真实通信性能**，真实 all-to-all 的带宽与延迟行为需要 GPU 环境与下游 dispatcher 源码。
+用 16 个 token、8 个 expert、`ep=4` 的纯 Python 模型（[08_moe_router_sim.py](codes/08_moe_router_sim.py) 的默认参数）说明"分桶 → 计算 → 还原"三段式：expert 按连续分块映射到 EP rank（8 个 expert 均分到 4 个 rank，每 rank 2 个），token 按 router 给出的 expert 归属进入对应 rank 的桶，每个桶内按 expert 顺序计算，最后按 token 原始位置还原输出。这个模型只验证路由记录与负载统计（`codes/tests/test_router.py` 断言分桶与还原的正确性），**它不声称复现 TorchTitan 的真实通信性能**，真实 all-to-all 的带宽与延迟行为需要 GPU 环境与下游 dispatcher 源码。
 
 ### 代码分析
 
@@ -677,22 +677,22 @@ def seq_len_divisor(self):
 
 （这个代码块是源码原样转录，其中 `pull/640#discussion_r1849481001` 是源码注释自带的非固定链接，不作为本文的证据链接；可复核证据是固定 commit 下 [seq_len_divisor 实现（L601-L609）](https://github.com/pytorch/torchtitan/blob/d6555c4c35a10bebcce652b58374cdeb2ecbe527/torchtitan/distributed/parallel_dims.py#L601-L609)。）
 
-配置审计的落点是 [10_parallel_config_advisor.py](10_parallel_config_advisor.py)：它按 `ERROR`（硬性失败，退出码 1）/ `WARN` / `CHECK` / `INFO` / `VALID` 分级输出，其中 dense 乘积、EP 整除与 `seq_len_divisor` 都是 `ERROR`/`VALID` 二值硬检查，`WARN`/`CHECK`/`INFO` 覆盖层数按 pp 均分、头数与 TP/CP 兼容性、expert 映射、TP/EP 是否跨节点边界等调用方层面的提示，脚本没有显存估算类检查。测试映射方面，`tests/test_validation.py` 的 A/D 只测 `ParallelDimsLite`、E 只测审计器、仅 B/C 跨两条路径，所以"构造器行为"与"审计器行为"的一致性只在这两例上被共同验证，其余是单路径覆盖，不能当成 production parity 保证。**注意审计通过只说明配置约束满足，不等于训练有效**，这是配置层与训练效果层的边界。
+配置审计的落点是 [10_parallel_config_advisor.py](codes/10_parallel_config_advisor.py)：它按 `ERROR`（硬性失败，退出码 1）/ `WARN` / `CHECK` / `INFO` / `VALID` 分级输出，其中 dense 乘积、EP 整除与 `seq_len_divisor` 都是 `ERROR`/`VALID` 二值硬检查，`WARN`/`CHECK`/`INFO` 覆盖层数按 pp 均分、头数与 TP/CP 兼容性、expert 映射、TP/EP 是否跨节点边界等调用方层面的提示，脚本没有显存估算类检查。测试映射方面，`codes/tests/test_validation.py` 的 A/D 只测 `ParallelDimsLite`、E 只测审计器、仅 B/C 跨两条路径，所以"构造器行为"与"审计器行为"的一致性只在这两例上被共同验证，其余是单路径覆盖，不能当成 production parity 保证。**注意审计通过只说明配置约束满足，不等于训练有效**，这是配置层与训练效果层的边界。
 
 ## 复现、证据边界与常见误解
 
 ### 如何复现
 
-前面九章的公式与形状都来自固定 commit 的源码，本章把它们收束成可复现的实验与证据边界。实验入口以 [notes/README.md](notes/README.md) 为唯一事实基线，从 `torch/parallel_dims_lab` 目录执行，按证据目的分四组：
+前面九章的公式与形状都来自固定 commit 的源码，本章把它们收束成可复现的实验与证据边界。实验入口以 [codes/README.md](codes/README.md) 为唯一事实基线，从 `torch/parallel_dims_lab` 目录执行，按证据目的分四组：
 
 | 实验组 | 脚本 | 命令 | 允许得出的结论 |
 | --- | --- | --- | --- |
-| rank/mesh | [02_mesh_coordinates.py](02_mesh_coordinates.py)、[07_mesh_inspector.py](07_mesh_inspector.py)、[tests/test_mesh_shapes.py](tests/test_mesh_shapes.py) | `python 02_mesh_coordinates.py`；`python 07_mesh_inspector.py`；`python -m pytest tests/test_mesh_shapes.py -q` | 坐标、axis group、mesh 形状与公式实现正确 |
-| parallelism simulation | [03_dp_fsdp_sim.py](03_dp_fsdp_sim.py)、[04_tp_mlp_sim.py](04_tp_mlp_sim.py)、[05_cp_pp_planner.py](05_cp_pp_planner.py)、[06_parallel_dims_lite.py](06_parallel_dims_lite.py) | `python 03_dp_fsdp_sim.py`；`python 04_tp_mlp_sim.py`；`python 05_cp_pp_planner.py`；`python 06_parallel_dims_lite.py` | 数学模型与 CPU 模拟路径一致 |
-| sparse/gradient | [08_moe_router_sim.py](08_moe_router_sim.py)、[09_gradient_accounting.py](09_gradient_accounting.py)、[tests/test_router.py](tests/test_router.py) | `python 08_moe_router_sim.py`；`python 09_gradient_accounting.py`；`python -m pytest tests/test_router.py -q` | 记录级别的路由/统计逻辑正确 |
-| config audit | [10_parallel_config_advisor.py](10_parallel_config_advisor.py)、[tests/test_validation.py](tests/test_validation.py) | `python 10_parallel_config_advisor.py --world-size 32 --gpus-per-node 8 --dp-replicate 2 --dp-shard 2 --cp 2 --tp 2 --pp 2 --ep 4 --seq-len 8192 --num-layers 32 --num-heads 32 --num-experts 8 --spmd-backend spmd_types --rank 0`；`python -m pytest tests/test_validation.py -q` | 审计器与当前约束的对应关系正确 |
+| rank/mesh | [02_mesh_coordinates.py](codes/02_mesh_coordinates.py)、[07_mesh_inspector.py](codes/07_mesh_inspector.py)、[codes/tests/test_mesh_shapes.py](codes/tests/test_mesh_shapes.py) | `python 02_mesh_coordinates.py`；`python 07_mesh_inspector.py`；`python -m pytest codes/tests/test_mesh_shapes.py -q` | 坐标、axis group、mesh 形状与公式实现正确 |
+| parallelism simulation | [03_dp_fsdp_sim.py](codes/03_dp_fsdp_sim.py)、[04_tp_mlp_sim.py](codes/04_tp_mlp_sim.py)、[05_cp_pp_planner.py](codes/05_cp_pp_planner.py)、[06_parallel_dims_lite.py](codes/06_parallel_dims_lite.py) | `python 03_dp_fsdp_sim.py`；`python 04_tp_mlp_sim.py`；`python 05_cp_pp_planner.py`；`python 06_parallel_dims_lite.py` | 数学模型与 CPU 模拟路径一致 |
+| sparse/gradient | [08_moe_router_sim.py](codes/08_moe_router_sim.py)、[09_gradient_accounting.py](codes/09_gradient_accounting.py)、[codes/tests/test_router.py](codes/tests/test_router.py) | `python 08_moe_router_sim.py`；`python 09_gradient_accounting.py`；`python -m pytest codes/tests/test_router.py -q` | 记录级别的路由/统计逻辑正确 |
+| config audit | [10_parallel_config_advisor.py](codes/10_parallel_config_advisor.py)、[codes/tests/test_validation.py](codes/tests/test_validation.py) | `python 10_parallel_config_advisor.py --world-size 32 --gpus-per-node 8 --dp-replicate 2 --dp-shard 2 --cp 2 --tp 2 --pp 2 --ep 4 --seq-len 8192 --num-layers 32 --num-heads 32 --num-experts 8 --spmd-backend spmd_types --rank 0`；`python -m pytest codes/tests/test_validation.py -q` | 审计器与当前约束的对应关系正确 |
 
-整套验证也可以一键执行：`python -m pytest tests/ -q`。唯一真实 collective 演示是 CPU/Gloo 的 `torchrun --standalone --nproc-per-node=4 01_collectives.py`（脚本见 [01_collectives.py](01_collectives.py)），它只证明该演示的通信逻辑在 CPU 上成立；其余脚本全部是纯 Python/CPU 模拟，**任何脚本的输出都不能写成真实 GPU 通信、吞吐、显存或训练质量 benchmark**。
+整套验证也可以一键执行：`python -m pytest codes/tests/ -q`。唯一真实 collective 演示是 CPU/Gloo 的 `torchrun --standalone --nproc-per-node=4 codes/01_collectives.py`（脚本见 [01_collectives.py](codes/01_collectives.py)），它只证明该演示的通信逻辑在 CPU 上成立；其余脚本全部是纯 Python/CPU 模拟，**任何脚本的输出都不能写成真实 GPU 通信、吞吐、显存或训练质量 benchmark**。
 
 ### 证据层级
 

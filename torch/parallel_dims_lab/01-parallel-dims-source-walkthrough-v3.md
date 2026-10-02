@@ -524,10 +524,10 @@ MoE 模块把 <code>get_optional_mesh("ep")</code> 传给路由和 expert 相关
 
 ### 8.1 推荐的本地入口
 
-本仓库的学习实验和源码基线说明在 [torch/parallel_dims_lab/notes/README.md](notes/README.md)。进入实验目录后，可以执行：
+本仓库的学习实验和源码基线说明在 [torch/parallel_dims_lab/codes/README.md](codes/README.md)。进入实验目录后，可以执行：
 
 ~~~bash
-cd torch/parallel_dims_lab
+cd torch/parallel_dims_lab/codes
 python -m pytest tests/ -q
 python 02_mesh_coordinates.py
 python 06_parallel_dims_lite.py
