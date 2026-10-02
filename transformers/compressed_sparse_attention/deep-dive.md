@@ -2451,6 +2451,6 @@ profiling 时寻找是否出现：
 交叉引用建议：正文已引用 dots3-note（第四章）、sglang scheduler 系列文章（第十二章背景）、mem-fraction-static（显存记账口径）、sglang code-walk-through 与 verl code-walk-through（第十二/十五章）。未引用 [Pending Review] 文章。
 
 独立复审记录：
-- 第 1 轮（第三方 AI，PROMPT-review.md）：7 项 P0、12 项 P1 修复（HCA 公式因果可见范围、压缩 KV 的 RoPE 块首锚点、§11.1/§11.2 的 prefill/decode 实际调用顺序并限定 CSA 层、§12.4 Ring 对比改为显式分析推断、社区 overlap_gather.py 改为同步顺序模拟、dots3 295K re-prefill 解析 FLOP 口径、T=N/m 整除假设、OCR 归因、#5960 引用与证据链、tracker 未勾选项、h_I/c_I 拆分、行锚点、驱动问题块、过渡句等）；P2 部分采纳。
-- 第 2 轮（第三方 AI，PROMPT-review-v2.md）：确认 6/7 P0 与 12 项 P1 修复正确；P0-6 残留（§12.5 访存绝对断言与「地址不可共享」）已进一步软化；新发现 2 项 P1 已修复（Day-0 多流重叠改为「另行披露」并注明不能推出排除关系、#6757 改为「未作核心引用、本地索引保留 triage background」）；P2 采纳（TinyCSA 预期输出与实跑逐字符对齐、CUDA Graph 背景交叉引用）。
+- 第 1 轮（第三方 AI，deep-review-r1.md）：7 项 P0、12 项 P1 修复（HCA 公式因果可见范围、压缩 KV 的 RoPE 块首锚点、§11.1/§11.2 的 prefill/decode 实际调用顺序并限定 CSA 层、§12.4 Ring 对比改为显式分析推断、社区 overlap_gather.py 改为同步顺序模拟、dots3 295K re-prefill 解析 FLOP 口径、T=N/m 整除假设、OCR 归因、#5960 引用与证据链、tracker 未勾选项、h_I/c_I 拆分、行锚点、驱动问题块、过渡句等）；P2 部分采纳。
+- 第 2 轮（第三方 AI，deep-review-r2.md）：确认 6/7 P0 与 12 项 P1 修复正确；P0-6 残留（§12.5 访存绝对断言与「地址不可共享」）已进一步软化；新发现 2 项 P1 已修复（Day-0 多流重叠改为「另行披露」并注明不能推出排除关系、#6757 改为「未作核心引用、本地索引保留 triage background」）；P2 采纳（TinyCSA 预期输出与实跑逐字符对齐、CUDA Graph 背景交叉引用）。
 -->

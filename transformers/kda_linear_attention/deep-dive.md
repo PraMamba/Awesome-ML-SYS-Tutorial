@@ -271,6 +271,7 @@ $$
 用 $q=[1,\,1]^\top$ 查询：$o=S_1^\top q=[0.4,\,0.7]^\top$，第一个 channel 被修改为"读新映射"，第二个 channel 保持了它自己的衰减速度（0.2 而不是 0.8）。
 
 如果像 GDN 一样使用统一标量 $\alpha=0.8$，同样的计算给出 $o_{\text{GDN}}=[0.4,\,1.3]^\top$，与 key 无关的第二个 channel 被迫共享 0.8 的寿命。这个例子并不证明 KDA 一定更好（它只是多了一个自由度，这个自由度用不用得好看训练），但它把"逐通道"的含义显式化了：**与当前 key 无关的记忆方向，可以拥有和第一个方向完全不同的寿命。**
+
 ## 四、模型演进：每一代具体增加了什么
 
 把前三章压缩成一张表，可以看到这条谱系连续回答的四个问题（**注意表中 KDA 行的 gate 记作 $\operatorname{Diag}(\alpha_t)\in\mathbb{R}^{d_k}$，是逐 key 维的；GDN 的 $\alpha_t$ 是标量**）：
@@ -410,7 +411,7 @@ large matrix × large matrix
 几万次小矩阵状态更新
 ```
 
-**问题不只是"串行依赖"，还有"算术强度"**：每个 token 的状态更新是一组 $d_k\times d_v$ 的矩阵读写与矩阵-向量乘（Moonshot 工程师的知乎解析（本地草稿 `kda_linear_attention-deep-dive_draft-2.md` 保留其技术内容）据此估算"约 6 次 head-dim × head-dim 的 CUDA core 乘加"，并进一步推断"head_dim=128 时 prefill 偏 compute bound、训练需间隔保存 FP32 中间状态"（**这是该文的口述直觉，本文不作断言**）；可从本地源码确认的事实是：论文 Eq. 13 的 $6Td_h^2$ 项与 §3.2 的矩阵化动机；FLA chunk 路径默认 `disable_recompute=False`（前向释放 `w,u,qg,kg,v_new,h`、反传重算，`chunk_fwd.py` L127–134），中间 `h` 也非一律 FP32（只有 `final_state` 明确 FP32，`chunk_delta_h.py` L714–719）。DeltaNet 论文对"纯递归 vs chunkwise"做过直接测速（§3.2 的速度对比图）：
+**问题不只是"串行依赖"，还有"算术强度"**：每个 token 的状态更新是一组 $d_k\times d_v$ 的矩阵读写与矩阵-向量乘（Moonshot 工程师的知乎解析（本地草稿 `deep-dive-draft-2.md` 保留其技术内容）据此估算"约 6 次 head-dim × head-dim 的 CUDA core 乘加"，并进一步推断"head_dim=128 时 prefill 偏 compute bound、训练需间隔保存 FP32 中间状态"（**这是该文的口述直觉，本文不作断言**）；可从本地源码确认的事实是：论文 Eq. 13 的 $6Td_h^2$ 项与 §3.2 的矩阵化动机；FLA chunk 路径默认 `disable_recompute=False`（前向释放 `w,u,qg,kg,v_new,h`、反传重算，`chunk_fwd.py` L127–134），中间 `h` 也非一律 FP32（只有 `final_state` 明确 FP32，`chunk_delta_h.py` L714–719）。DeltaNet 论文对"纯递归 vs chunkwise"做过直接测速（§3.2 的速度对比图）：
 
 <div style="text-align: center; width: 100%; margin: 0 auto;">
     <img src="./pics/deltanet-fig1-chunk-speed.jpg" alt="DeltaNet 论文的 Triton kernel 测速：横轴为序列长度（0.5K 至 16K），纵轴为 chunkwise 并行实现相对纯递归实现的加速比，三条曲线对应 head dim 64/128/256，head dim 越大、序列越长加速比越高（16K/256 时约 35x）" style="width: 60%;">
@@ -1335,14 +1336,14 @@ o5, ht5 = fused_recurrent_kda(q, k, v, g, beta, A_log=A_log, dt_bias=dt_bias,
 | [KDA 数学原理（Zhiyuan Li）](https://zhiyuan1i.github.io/posts/kda-mathematics/) | 个人技术博客（KaTeX 数学文，无正文插图），本地 `references/articles/kda-mathematics/` | chunk-wise / Affine / WY / CP/SM 推导的交叉验证 |
 | [DPLR 数学原理（Zhiyuan Li）](https://zhiyuan1i.github.io/posts/dplr-mathematics/) | 同上，本地 `references/articles/dplr-mathematics/` | DPLR vs KDA vs IPLR 统一框架 |
 | [hwilner 教学复现](https://github.com/hwilner/kimi-delta-attention/tree/4b08a62c6ed7c94a8a3a730cd8beb2847da4fe5e)（本地 `references/community/kimi-delta-attention/`，commit `4b08a62c`） | 社区 MIT 教学实现，**非官方** | 未作为公式来源；仅可用于概念教学对照（本文未引用其代码） |
-| Moonshot 工程师知乎解析（KDA 并行计算） | 口述式素材，本地草稿 `kda_linear_attention-deep-dive_draft-2.md` 保留其技术内容 | §7.1 算术直觉、§8.4 数值雷区叙事（所有公式均已回论文/源码复核后再采用） |
+| Moonshot 工程师知乎解析（KDA 并行计算） | 口述式素材，本地草稿 `deep-dive-draft-2.md` 保留其技术内容 | §7.1 算术直觉、§8.4 数值雷区叙事（所有公式均已回论文/源码复核后再采用） |
 
 **图片来源说明**：正文复用的 15 张图全部来自上述论文目录（`references/papers/<slug>/images/`），均已复制到本文 `pics/` 下并以相对路径引用（`./pics/<name>.jpg`），每张图配图注与出处；三张自绘 Mermaid（§9.1 单层数据流、§11.2 前向编排、§12.1 混合缓存）均在正文标明为自绘。经核验的三处来源边界：两篇 Zhiyuan Li 博客**无正文插图**；draft-2/4 中的知乎在线图片未随仓库保存（不引用）；论文图片目录中未被 `.md` 引用的哈希文件为 MinerU 转换产生的公式/版面渲染资产（公式、表格渲染等），**不属于正文插图，不纳入 61 张正文图的复用核对**。
 
 > 社区复现（hwilner）、博客（Zhiyuan Li）、论文、官方 checkpoint 四类来源在正文中分开标注；冲突时以"锁定 commit 的源码 / 官方论文"为准。
 
 <!-- /learn-write 自动检查报告
-本稿已完成四轮独立审核（作者侧 + 外部 REVIEW-deep / REVIEW-deep-r3 / REVIEW-deep-r4 / REVIEW-deep-r5），全部 P0 已闭环（处理记录见 REVIEW.md / REVISION.md）。
+本稿已完成四轮独立审核（作者侧 + 外部 REVIEW-deep / REVIEW-deep-r3 / REVIEW-deep-r4 / REVIEW-deep-r5），全部 P0 已闭环（处理记录见 learn-review-r1.md / revision.md）。
 双轨：概念(§1–§4) → 模型/算法(§5–§8) → 代码(§9–§12)；源码引用锁定 commit（FLA 6ec09887 + b5d48b7d/97aaf767/19b5a3f4；SGLang 7399c2b5；Megatron upstream/dev@788e9e1；vLLM 0384aa7；FlashKDA 1ce47ea；verl 9ff05e32），无 main 分支行号。
 格式：15 张复用图（pics/，相对路径可解析，均有 alt、图注与出处）；3 张自绘 Mermaid（§9.1/§11.2/§12.1，已标注）；正文无 ASCII 字符画、无破折号；附录与参考资料为二级标题。
 -->
