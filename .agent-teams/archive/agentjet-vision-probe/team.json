@@ -1,0 +1,10 @@
+{
+  "name": "agentjet-vision-probe",
+  "id": "agentjet-vision-probe",
+  "description": "探测 deepseek-v4-flash-vision-exp 模型成员能否用 read_image 查看本地论文图片",
+  "captainSessionId": "d2a2fafb-3832-4d30-a210-e229f5c8d689",
+  "createdAt": 1788966879189,
+  "members": [],
+  "tasks": [],
+  "taskSeq": 0
+}

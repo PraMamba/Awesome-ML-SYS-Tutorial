@@ -65,10 +65,10 @@
 当前 Python 示例不只位于 torch/torch-distributed/codes/：
 
 - torch/torch-distributed/codes/ 是 torch.distributed 通信 API 示例，按各自说明使用 python 或 torchrun。
-- torch/parallel_dims_lab/ 是 ParallelDims 学习实验，包含 01 到 10 脚本、共享小工具、pytest 测试和 notes/README.md。除 01_collectives.py 的 CPU/Gloo 多进程演示外，其余脚本是 CPU 张量或本地列表模拟，不测量真实通信性能。
-- 该实验的事实基线、源码 commit、文档差异和运行命令集中记录在 [torch/parallel_dims_lab/notes/README.md](torch/parallel_dims_lab/notes/README.md)，不要从旧学习文章猜测当前 API。
+- torch/parallel_dims_lab/ 是 ParallelDims 学习实验，包含 01 到 10 脚本、共享小工具和 pytest 测试（均在 codes/ 下），codes/README.md 记录事实基线和运行命令。除 01_collectives.py 的 CPU/Gloo 多进程演示外，其余脚本是 CPU 张量或本地列表模拟，不测量真实通信性能。
+- 该实验的事实基线、源码 commit、文档差异和运行命令集中记录在 [torch/parallel_dims_lab/codes/README.md](torch/parallel_dims_lab/codes/README.md)，不要从旧学习文章猜测当前 API。
 
-运行和验证命令以 [torch/parallel_dims_lab/notes/README.md](torch/parallel_dims_lab/notes/README.md) 为唯一入口；需要验证时进入该目录，按 notes 中的测试或脚本说明执行。
+运行和验证命令以 [torch/parallel_dims_lab/codes/README.md](torch/parallel_dims_lab/codes/README.md) 为唯一入口；需要验证时进入该目录，按 codes/README.md 中的测试或脚本说明执行。
 
 不要把这些脚本的模拟结果写成真实 GPU 通信、吞吐或显存 benchmark；01 的 Gloo 结果也只证明该演示的通信逻辑在 CPU 上成立。
 
@@ -134,7 +134,35 @@ Codex 不把 `.claude/commands/` 当作 shell 命令执行；这些文件是本�
 
 ### 当前 ParallelDims 草稿的路由
 
-`torch/parallel_dims_lab/01-parallel-dims-source-walkthrough.md` 当前不在两个 README 的正式目录中，因此状态是 draft。推荐先以 `code-walkthrough`、`understand-reproduce` 路由 `/learn-plan`，再以计划调用 `/learn-write` 和 `/learn-review`；只有正式发布后才考虑 `/learn-add`。源码基线和差异清单以 [`torch/parallel_dims_lab/notes/README.md`](torch/parallel_dims_lab/notes/README.md) 及其中记录的固定 commit 为准。
+`torch/parallel_dims_lab/parallel-dims-source-walkthrough.md` 当前不在两个 README 的正式目录中，因此状态是 draft。推荐先以 `code-walkthrough`、`understand-reproduce` 路由 `/learn-plan`，再以计划调用 `/learn-write` 和 `/learn-review`；只有正式发布后才考虑 `/learn-add`。源码基线和差异清单以 [`torch/parallel_dims_lab/codes/README.md`](torch/parallel_dims_lab/codes/README.md) 及其中记录的固定 commit 为准。
+
+## 文章模块的目录结构
+
+新增的文章模块（`<category>/<topic>/`）统一使用下面的子目录。有内容才建；过程文件不在模块根平铺。
+
+```
+<category>/<topic>/
+├── readme.md 或 deep-dive.md    文章本体
+├── learn-plan.md                /learn 的学习计划
+├── pics/                        文章配图
+├── codes/                       可运行代码（含 tests/、README.md）
+├── references/                  原始资料（papers/ articles/ community/ upstream/ …）
+├── docs/
+│   ├── prompts/                 交给 agent 的提示词
+│   ├── reviews/                 评审报告、修订记录、独立复核
+│   ├── research/                事实核验、图片调研、源码核对、参考资料审计
+│   └── plans/                   发布建议包、重写进度记录
+├── scripts/                     文章自检脚本
+└── archive/                     被取代的草稿
+```
+
+- **命名**：目录名和文件名用小写 kebab-case 英文，按文件内容命名；`.py`、`.sh` 沿用各自语言的惯例。
+- **轮次**：同一角色的多轮文件用同一个词干加轮次后缀，轮次取文件自称的编号，如 `learn-review-r1.md`、`deep-review-r3.md`、`revision-r2.md`。提示词与它产出的报告同名成对：`docs/prompts/deep-review-r3.md` 对应 `docs/reviews/deep-review-r3.md`。
+- **词干**：`learn-pipeline`、`learn-review`、`deep-review`、`independent-review`、`revision`、`math-verification`、`image-verification`、`image-survey-<来源>`、`source-verification-<对象>`、`references-audit`、`publish-package`。已有词干适用时不另起新名。
+- **草稿**：被取代的文章版本放 `archive/<文章名>-draft-N.md`。
+- **提交范围**：`docs/`、`scripts/`、`archive/`、`references/` 和 `learn-plan.md` 由 `.gitignore` 的 `/*/*/<名称>` 规则忽略，只留在本地。随文章提交的是文章本体及其引用的 `pics/`、`codes/`。
+- **文章链接**：文章正文不链接这四个被忽略目录里的文件，读者在 GitHub 上打不开。
+- **过程文件**：评审、调研、提示词是当时的记录，叙述不改；文件移动或改名后只更新其中的链接与路径。
 
 ## 内容与写作规范
 
@@ -186,5 +214,5 @@ Codex 不把 `.claude/commands/` 当作 shell 命令执行；这些文件是本�
 | 查看命令的实际流程和写入边界 | [.learn/skill.md](.learn/skill.md) 与 [.claude/commands/](.claude/commands/) |
 | 写作、审查或翻译 | [.learn/index/style-guide.md](.learn/index/style-guide.md)、[.learn/config.md](.learn/config.md)、[.learn/templates/](.learn/templates/) |
 | 判断文章是否可被 /learn-add 收录 | [README.md](README.md)、[README-cn.md](README-cn.md)、[.claude/commands/learn-add.md](.claude/commands/learn-add.md) |
-| 运行或修改 ParallelDims 学习实验 | [torch/parallel_dims_lab/notes/README.md](torch/parallel_dims_lab/notes/README.md)、对应 .py 和 tests/ |
+| 运行或修改 ParallelDims 学习实验 | [torch/parallel_dims_lab/codes/README.md](torch/parallel_dims_lab/codes/README.md)、codes/ 下对应的 .py 和 tests/ |
 | 理解 PyTorch/FSDP 教程代码 | 对应 torch/fsdp2/**/readme.md、torch/**/readme.md 和同目录 codes/ |

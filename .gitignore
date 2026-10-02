@@ -162,3 +162,11 @@ cython_debug/
 #.idea/
 
 .DS_Store
+
+# Working material of article modules (<category>/<topic>/): kept local, not committed
+/*/*/docs/
+/*/*/scripts/
+/*/*/archive/
+/*/*/references/
+/*/*/learn-plan.md
+!/.claude/commands/learn-plan.md
