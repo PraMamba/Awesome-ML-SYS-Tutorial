@@ -39,7 +39,7 @@
 | 第四轮 | 追踪真实训练与推理实现 | SGLang、Megatron-LM、Transformers、verl |
 | 第五轮 | 检查实现差异、历史错误和未完成事项 | GitHub PR、issue、roadmap |
 
-检索日期为 **2026 年 8 月 29 日**，与本地参考资料索引（[references/README.md](references/README.md)）的锁定记录一致。文中涉及「已合并」「草案」「开发中」的表述均以该日期为截点；SGLang #23882（merge commit `35870d55`）、#24890（merge commit `e2290b15`）、Megatron #6400（merge commit `a2003d48`）均已合入主线，Megatron #6404 仍为 draft，Megatron #6757 是 MoE roadmap，与本文无直接关系，未作为本文核心引用（本地参考资料索引仍保留其为 triage background 条目，见 [references/README.md](references/README.md)）。
+检索日期为 **2026 年 8 月 29 日**。文中涉及「已合并」「草案」「开发中」的表述均以该日期为截点；SGLang #23882（merge commit `35870d55`）、#24890（merge commit `e2290b15`）、Megatron #6400（merge commit `a2003d48`）均已合入主线，Megatron #6404 仍为 draft，Megatron #6757 是 MoE roadmap，与本文无直接关系，未作为本文核心引用。
 
 ---
 
@@ -1448,7 +1448,7 @@ DeepSeek-V4-Pro 官方 Hugging Face 仓库提供了可读参考实现（`inferen
 | `inference/kernel.py` | `5607980f3a4b8ea0371b9f11e1848ac41f14979e` | TileLang 稀疏注意力与低精度 kernel |
 | `inference/config.json` | `5607980f3a4b8ea0371b9f11e1848ac41f14979e` | Pro 层配置与超参数 |
 
-该 commit 为 2026-06-22 的 main 快照，三份文件与 main 逐一 md5 一致，因此引用它不会与当前 main 产生内容偏差。本地副本见 [references/model.py](references/model.py)、[references/kernel.py](references/kernel.py)、[references/config.json](references/config.json)。下文行号均对应此锁定版本。
+该 commit 为 2026-06-22 的 main 快照，三份文件与 main 逐一 md5 一致，因此引用它不会与当前 main 产生内容偏差。三份文件的在线版本：[model.py](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/5607980f3a4b8ea0371b9f11e1848ac41f14979e/inference/model.py)、[kernel.py](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/5607980f3a4b8ea0371b9f11e1848ac41f14979e/inference/kernel.py)、[config.json](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/5607980f3a4b8ea0371b9f11e1848ac41f14979e/inference/config.json)。下文行号均对应此锁定版本。
 
 ### 10.2 公式—源码映射
 
@@ -1760,7 +1760,7 @@ SGLang 团队报告：
 
 > 上表是机制层面的分析对照，不是实测数据：「零浪费」仅指逻辑视图上按需读取、无冗余条目；物理访存效率与总线行为未被官方资料披露。
 
-针对这种访存模式，社区教学复现（dhcode95 的「手撕 DeepSeek-V4」系列，[deepseek-v4-mini](references/community/deepseek-v4-mini/)）给出了一个「预取下一块、同时计算当前块」的流水示例：把 t+1 时刻的 KV 子块 gather 提前到 t 时刻的计算之前发起，用固定大小的块（如 64 个 id 一组）保证每次预取量恒定。需要指出，其 `overlap_gather.py` 是**同步顺序模拟**：代码注释写的是 async prefetch，但实现只是把下一次 gather 的 torch 调用提前到计算语句之前，没有使用 CUDA stream/event，也没有测量真实 overlap，因此它只能说明流水化的数据依赖结构，不能作为生产 kernel 异步执行或性能的证据。DeepSeek-V4 技术报告同样未公布 CSA gather 的 kernel 级重叠细节（报告 §3.1 的通信-计算重叠针对的是 MoE expert parallelism，不是 attention gather）；SGLang 在 Day-0 博客中另行披露了一项注意力准备阶段的 hierarchical multi-stream overlap：把 indexer 的 Q projection、weights projection 与 compressor GEMM 等准备操作在两级 CUDA stream 上扇出并行，用 `q_lora_ready` / `q_scale_ready` 这类细粒度事件做依赖交接，只在 batch 很小时生效（大 prefill 设备已饱和，重叠无收益）。需要说明，Day-0 披露的这项 overlap 针对的是注意力准备阶段，不能据此推出它替代或排除了 per-query gather 预取路径。([LMSYS Org][2])
+针对这种访存模式，社区教学复现（dhcode95 的「手撕 DeepSeek-V4」系列，[DeepSeek-V4-mini](https://github.com/dhcode-cpp/DeepSeek-V4-mini/tree/02283799381944003c1a92308d3197d95f386472)）给出了一个「预取下一块、同时计算当前块」的流水示例：把 t+1 时刻的 KV 子块 gather 提前到 t 时刻的计算之前发起，用固定大小的块（如 64 个 id 一组）保证每次预取量恒定。需要指出，其 [`lc4/overlap_gather.py`](https://github.com/dhcode-cpp/DeepSeek-V4-mini/blob/02283799381944003c1a92308d3197d95f386472/lc4/overlap_gather.py) 是**同步顺序模拟**：代码注释写的是 async prefetch，但实现只是把下一次 gather 的 torch 调用提前到计算语句之前，没有使用 CUDA stream/event，也没有测量真实 overlap，因此它只能说明流水化的数据依赖结构，不能作为生产 kernel 异步执行或性能的证据。DeepSeek-V4 技术报告同样未公布 CSA gather 的 kernel 级重叠细节（报告 §3.1 的通信-计算重叠针对的是 MoE expert parallelism，不是 attention gather）；SGLang 在 Day-0 博客中另行披露了一项注意力准备阶段的 hierarchical multi-stream overlap：把 indexer 的 Q projection、weights projection 与 compressor GEMM 等准备操作在两级 CUDA stream 上扇出并行，用 `q_lora_ready` / `q_scale_ready` 这类细粒度事件做依赖交接，只在 batch 很小时生效（大 prefill 设备已饱和，重叠无收益）。需要说明，Day-0 披露的这项 overlap 针对的是注意力准备阶段，不能据此推出它替代或排除了 per-query gather 预取路径。([LMSYS Org][2])
 
 ---
 
